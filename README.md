@@ -1,0 +1,26 @@
+# About this repo
+
+This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) using [Chaitin SafeLine](https://www.chaitin.cn/zh/safeline) as backend engine.
+
+# How to use
+
+```
+(waf) {
+	route {
+		waf_chaitin {
+			waf_engine_addr 169.254.0.5:8000
+		}
+	}
+}
+
+:8000 {
+	import waf
+	respond / "Hello, world!"
+}
+
+```
+
+# TODO
+- [x] Detection and Interception  
+- [x]  Pass the `remote_addr` to the Engine  
+- [ ]  Multi backend engine instances support, include Load Balance and High Availability
