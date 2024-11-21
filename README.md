@@ -20,6 +20,12 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 
 ```
 
+# How to build
+
+```
+xcaddy build --with github.com/W0n9/caddy_waf_t1k
+```
+
 # TODO
 - [x] Detection and Interception  
 - [x]  Pass the `remote_addr` to the Engine  
