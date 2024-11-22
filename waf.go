@@ -56,13 +56,13 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		os.Exit(1)
 	}
 
-	// wafEngine, err := initDetect(m.WafEngineAddr)
-	// if err != nil {
-	// 	m.logger.Fatal("init detect error", zap.Error(err))
-	// 	os.Exit(1)
-	// }
+	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
+	if err != nil {
+		m.logger.Fatal("init detect error", zap.Error(err))
+		os.Exit(1)
+	}
 
-	// m.wafEngine = wafEngine
+	m.wafEngine = wafEngine
 	return nil
 }
 
@@ -74,12 +74,12 @@ func (m *CaddyWAF) Validate() error {
 
 // ServeHTTP handles HTTP requests and applies WAF logic.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
-	if err != nil {
-		m.logger.Error("init WAF detector error", zap.Error(err))
-		return next.ServeHTTP(w, r)
-	}
-	m.wafEngine = wafEngine
+	// wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
+	// if err != nil {
+	// 	m.logger.Error("init WAF detector error", zap.Error(err))
+	// 	return next.ServeHTTP(w, r)
+	// }
+	// m.wafEngine = wafEngine
 	result, err := m.wafEngine.DetectHttpRequest(r)
 	if err != nil {
 		m.logger.Error("DetectHttpRequest error", zap.Error(err))
