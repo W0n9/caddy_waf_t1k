@@ -22,6 +22,8 @@ type CaddyWAF struct {
 	WafEngineAddr string `json:"waf_engine_addr,omitempty"` // WAF Engine address
 	logger        *zap.Logger
 	wafEngine     *t1k.Server
+	PoolSize      int `json:"pool_size,omitempty"` // Pool size
+	// mu            sync.Mutex
 	// block_tpl_path string `json:"block_tpl_path"` // Block template path
 }
 
@@ -34,8 +36,8 @@ func (CaddyWAF) CaddyModule() caddy.ModuleInfo {
 }
 
 // initDetect initializes the WAF engine.
-func initDetect(detectorAddr string) (*t1k.Server, error) {
-	server, err := t1k.NewWithPoolSize(detectorAddr, 10)
+func initDetect(detectorAddr string, poolSize int) (*t1k.Server, error) {
+	server, err := t1k.NewWithPoolSize(detectorAddr, poolSize)
 	return server, err
 }
 
@@ -49,13 +51,18 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		os.Exit(1)
 	}
 
-	wafEngine, err := initDetect(m.WafEngineAddr)
-	if err != nil {
-		m.logger.Fatal("init detect error", zap.Error(err))
+	if m.PoolSize == 0 {
+		m.logger.Fatal("Pool Size is required")
 		os.Exit(1)
 	}
 
-	m.wafEngine = wafEngine
+	// wafEngine, err := initDetect(m.WafEngineAddr)
+	// if err != nil {
+	// 	m.logger.Fatal("init detect error", zap.Error(err))
+	// 	os.Exit(1)
+	// }
+
+	// m.wafEngine = wafEngine
 	return nil
 }
 
@@ -67,6 +74,12 @@ func (m *CaddyWAF) Validate() error {
 
 // ServeHTTP handles HTTP requests and applies WAF logic.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
+	if err != nil {
+		m.logger.Error("init WAF detector error", zap.Error(err))
+		return next.ServeHTTP(w, r)
+	}
+	m.wafEngine = wafEngine
 	result, err := m.wafEngine.DetectHttpRequest(r)
 	if err != nil {
 		m.logger.Error("DetectHttpRequest error", zap.Error(err))
@@ -78,13 +91,13 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	return next.ServeHTTP(w, r)
 }
 
-// Start starts the WAF module.
+// Start the WAF module.
 func (m CaddyWAF) Start() error {
 	m.logger.Info("WAF module started.")
 	return nil
 }
 
-// Stop stops the WAF module.
+// Stop the WAF module.
 func (m CaddyWAF) Stop() error {
 	m.logger.Info("WAF module stopped.")
 	return nil

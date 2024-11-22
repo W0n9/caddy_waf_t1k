@@ -1,6 +1,8 @@
 package caddy_waf_t1k
 
 import (
+	"strconv"
+
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -23,6 +25,15 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			m.WafEngineAddr = d.Val()
+		case "pool_size":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			poolSize, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid pool_size value: %v", err)
+			}
+			m.PoolSize = poolSize
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
@@ -35,6 +46,7 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //
 //	waf_chaitin {
 //	    waf_engine_addr 169.254.0.5:8000
+//		pool_size 100
 //	}
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m CaddyWAF
