@@ -1,6 +1,6 @@
 # About this repo
 
-This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) using [Chaitin SafeLine](https://www.chaitin.cn/zh/safeline) as backend engine.
+This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) using [Chaitin SafeLine](https://github.com/chaitin/SafeLine) as backend engine.
 
 # How to use
 
