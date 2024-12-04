@@ -34,6 +34,15 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid pool_size value: %v", err)
 			}
 			m.PoolSize = poolSize
+		// case "timeout":
+		// 	if !d.NextArg() {
+		// 		return d.ArgErr()
+		// 	}
+		// 	timeout, err := strconv.Atoi(d.Val())
+		// 	if err != nil {
+		// 		return d.Errf("invalid timeout value: %v", err)
+		// 	}
+		// 	m.Timeout = time.Duration(timeout) * time.Second
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}

@@ -1,8 +1,8 @@
 package caddy_waf_t1k
 
 import (
+	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/chaitin/t1k-go"
 
@@ -47,32 +47,33 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if m.WafEngineAddr == "" {
-		m.logger.Fatal("WAF Engine Address is required")
-		os.Exit(1)
+		return fmt.Errorf("web application firewall engine address is required")
 	}
 
 	if m.PoolSize == 0 {
-		m.logger.Fatal("Pool Size is required")
-		os.Exit(1)
+		return fmt.Errorf("pool size is required")
 	}
 
 	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
 	if err != nil {
-		m.logger.Fatal("init detect error", zap.Error(err))
-		os.Exit(1)
+		return fmt.Errorf("init detect error: %v", err)
 	}
 
 	m.wafEngine = wafEngine
+	m.logger.Info("WAF plugin instance Provisioned")
 	return nil
 }
 
-// Validate validates the WAF module configuration.
-func (m *CaddyWAF) Validate() error {
-	m.logger.Info("Validating WAF plugin configuration")
-	return nil
-}
+// // Validate validates the WAF module configuration.
+// func (m *CaddyWAF) Validate() error {
+// 	m.logger.Info("Validating WAF plugin configuration")
+// 	return nil
+// }
 
-// ServeHTTP handles HTTP requests and applies WAF logic.
+// ServeHTTP is the main handler for the CaddyWAF middleware. It processes incoming HTTP requests,
+// uses the WAF engine to detect potential threats, and takes appropriate actions based on the detection results.
+// If a threat is detected and blocked, it redirects the request to an intercept page. Otherwise, it passes the request
+// to the next handler in the chain.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	// wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
 	// if err != nil {
@@ -91,22 +92,19 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	return next.ServeHTTP(w, r)
 }
 
-// Start the WAF module.
-func (m CaddyWAF) Start() error {
-	m.logger.Info("WAF module started.")
-	return nil
-}
-
-// Stop the WAF module.
-func (m CaddyWAF) Stop() error {
-	m.logger.Info("WAF module stopped.")
+// Cleanup releases resources associated with the CaddyWAF instance.
+// It closes the WAF engine and logs the cleanup action.
+// Returns an error if any issues occur during the cleanup process.
+func (m CaddyWAF) Cleanup() error {
+	m.wafEngine.Close()
+	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
 }
 
 // Interface guards
 var (
-	_ caddy.Provisioner           = (*CaddyWAF)(nil)
-	_ caddy.Validator             = (*CaddyWAF)(nil)
+	_ caddy.Provisioner = (*CaddyWAF)(nil)
+	// _ caddy.Validator             = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
 )
