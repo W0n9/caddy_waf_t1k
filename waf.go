@@ -3,8 +3,10 @@ package caddy_waf_t1k
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/chaitin/t1k-go"
+	"github.com/chaitin/t1k-go/detection"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -19,10 +21,11 @@ func init() {
 
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
-	WafEngineAddr string `json:"waf_engine_addr,omitempty"` // WAF Engine address
+	WafEngineAddr string `json:"waf_engine_addr,omitempty"` // WAF Engine address, expects a URL or IP address
 	logger        *zap.Logger
 	wafEngine     *t1k.Server
-	PoolSize      int `json:"pool_size,omitempty"` // Pool size
+	PoolSize      int           `json:"pool_size,omitempty"` // Pool size determines the number of concurrent connections the WAF engine can handle
+	Timeout       time.Duration `json:"timeout,omitempty"`   // Timeout for WAF detection to process an HTTP request
 	// mu            sync.Mutex
 	// block_tpl_path string `json:"block_tpl_path"` // Block template path
 }
@@ -54,12 +57,20 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("pool size is required")
 	}
 
+	if m.Timeout == time.Duration(0)*time.Millisecond {
+		return fmt.Errorf("timeout is required")
+	}
+
 	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
 	if err != nil {
 		return fmt.Errorf("init detect error: %v", err)
 	}
 
 	m.wafEngine = wafEngine
+	if m.wafEngine == nil {
+		return fmt.Errorf("wafEngine initialization failed")
+	}
+
 	m.logger.Info("WAF plugin instance Provisioned")
 	return nil
 }
@@ -70,33 +81,63 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 // 	return nil
 // }
 
-// ServeHTTP is the main handler for the CaddyWAF middleware. It processes incoming HTTP requests,
-// uses the WAF engine to detect potential threats, and takes appropriate actions based on the detection results.
-// If a threat is detected and blocked, it redirects the request to an intercept page. Otherwise, it passes the request
-// to the next handler in the chain.
+// ServeHTTP processes incoming HTTP requests by utilizing the Caddy WAF engine to detect
+// potential threats. If a request is identified as malicious, it redirects the request to
+// an intercept handler. Otherwise, it passes the request to the next handler in the chain.
+// The method handles detection errors and enforces a timeout for the detection process,
+// logging relevant information in each case.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	// wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
+
+	// result, err := m.wafEngine.DetectHttpRequest(r)
 	// if err != nil {
-	// 	m.logger.Error("init WAF detector error", zap.Error(err))
+	// 	m.logger.Error("DetectHttpRequest error", zap.Error(err))
 	// 	return next.ServeHTTP(w, r)
 	// }
-	// m.wafEngine = wafEngine
-	result, err := m.wafEngine.DetectHttpRequest(r)
-	if err != nil {
-		m.logger.Error("DetectHttpRequest error", zap.Error(err))
+	// if result.Blocked() {
+	// 	return m.redirectIntercept(w, result)
+	// }
+	// return next.ServeHTTP(w, r)
+
+	resultCh := make(chan *detection.Result, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		// TODO: Add logging for WAF processing duration
+		// start := time.Now()
+		// defer func() {
+		// 	// Log the total duration taken to process the request
+		// 	m.logger.Info("WAF detection processed", zap.Duration("duration", time.Since(start)))
+		// 	m.logger.Info("Processing", zap.String("request", r.Host), zap.String("path", r.URL.Path))
+		// }()
+
+		result, err := m.wafEngine.DetectHttpRequest(r)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.Blocked() {
+			return m.redirectIntercept(w, result)
+		}
+	case err := <-errCh:
+		m.logger.Error("DetectHttpRequest error", zap.String("request", r.Host), zap.String("path", r.URL.Path), zap.String("method", r.Method), zap.Error(err))
 		return next.ServeHTTP(w, r)
-	}
-	if result.Blocked() {
-		return m.redirectIntercept(w, result)
+	case <-time.After(m.Timeout):
+		m.logger.Error("DetectHttpRequest timeout", zap.String("request", r.Host), zap.String("path", r.URL.Path), zap.String("method", r.Method))
+		return next.ServeHTTP(w, r)
 	}
 	return next.ServeHTTP(w, r)
 }
 
-// Cleanup releases resources associated with the CaddyWAF instance.
-// It closes the WAF engine and logs the cleanup action.
-// Returns an error if any issues occur during the cleanup process.
+// Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
 func (m CaddyWAF) Cleanup() error {
-	m.wafEngine.Close()
+	if m.wafEngine != nil {
+		m.wafEngine.Close()
+	}
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
 }

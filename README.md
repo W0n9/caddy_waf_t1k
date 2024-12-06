@@ -10,6 +10,7 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 		waf_chaitin {
 			waf_engine_addr 169.254.0.5:8000
 			pool_size 10
+			timeout 1000
 		}
 	}
 }
