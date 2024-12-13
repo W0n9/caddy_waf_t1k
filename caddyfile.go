@@ -26,25 +26,42 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			m.WafEngineAddr = d.Val()
-		case "pool_size":
+		case "initial_cap":
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			poolSize, err := strconv.Atoi(d.Val())
+			initialCap, err := strconv.Atoi(d.Val())
 			if err != nil {
-				return d.Errf("invalid pool_size value: %v", err)
+				return d.Errf("invalid initial_cap value: %v", err)
 			}
-			m.PoolSize = poolSize
-		case "timeout":
+			m.InitialCap = initialCap
+		case "max_idle":
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			timeout, err := strconv.Atoi(d.Val())
+			maxIdle, err := strconv.Atoi(d.Val())
 			if err != nil {
-				return d.Errf("invalid timeout value: %v", err)
+				return d.Errf("invalid max_idle value: %v", err)
 			}
-			// m.Timeout = time.Duration(timeout) * time.Second
-			m.Timeout = time.Duration(timeout) * time.Millisecond
+			m.MaxIdle = maxIdle
+		case "max_cap":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			maxCap, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid max_cap value: %v", err)
+			}
+			m.MaxCap = maxCap
+		case "idle_timeout":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			idleTimeout, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid idle_timeout value: %v", err)
+			}
+			m.IdleTimeout = time.Duration(idleTimeout) * time.Second
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
@@ -57,8 +74,10 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //
 //	waf_chaitin {
 //	    waf_engine_addr 169.254.0.5:8000
-//		pool_size 100
-//		timeout 1000
+//		initial_cap 1
+//		max_idle 16
+//		max_cap 32
+//		idle_timeout 30
 //	}
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m CaddyWAF

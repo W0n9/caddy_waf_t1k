@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/chaitin/t1k-go"
-	"github.com/chaitin/t1k-go/detection"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -23,10 +22,11 @@ func init() {
 type CaddyWAF struct {
 	WafEngineAddr string `json:"waf_engine_addr,omitempty"` // WAF Engine address, expects a URL or IP address
 	logger        *zap.Logger
-	wafEngine     *t1k.Server
-	PoolSize      int           `json:"pool_size,omitempty"` // Pool size determines the number of concurrent connections the WAF engine can handle
-	Timeout       time.Duration `json:"timeout,omitempty"`   // Timeout for WAF detection to process an HTTP request
-	// mu            sync.Mutex
+	wafEngine     *t1k.ChannelPool
+	InitialCap    int           `json:"initial_cap,omitempty"`  // InitialCap is the initial capacity of the pool
+	MaxIdle       int           `json:"max_idle,omitempty"`     // MaxIdle is the maximum number of idle connections in the pool
+	MaxCap        int           `json:"max_cap,omitempty"`      // MaxCap is the maximum capacity of the pool
+	IdleTimeout   time.Duration `json:"idle_timeout,omitempty"` // IdleTimeout is the duration after which an idle connection is closed
 	// block_tpl_path string `json:"block_tpl_path"` // Block template path
 }
 
@@ -39,8 +39,11 @@ func (CaddyWAF) CaddyModule() caddy.ModuleInfo {
 }
 
 // initDetect initializes the WAF engine.
-func initDetect(detectorAddr string, poolSize int) (*t1k.Server, error) {
-	server, err := t1k.NewWithPoolSize(detectorAddr, poolSize)
+func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
+	server, err := t1k.NewChannelPool(pc)
+	if err != nil {
+		return nil, err
+	}
 	return server, err
 }
 
@@ -53,15 +56,35 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("web application firewall engine address is required")
 	}
 
-	if m.PoolSize == 0 {
-		return fmt.Errorf("pool size is required")
+	if m.InitialCap == 0 {
+		m.logger.Info("InitialCap is not set, defaulting to 1")
+		m.InitialCap = 1
 	}
 
-	if m.Timeout == time.Duration(0)*time.Millisecond {
-		return fmt.Errorf("timeout is required")
+	if m.MaxIdle == 0 {
+		m.logger.Info("MaxIdle is not set, defaulting to 16")
+		m.MaxIdle = 16
 	}
 
-	wafEngine, err := initDetect(m.WafEngineAddr, m.PoolSize)
+	if m.MaxCap == 0 {
+		m.logger.Info("MaxCap is not set, defaulting to 32")
+		m.MaxCap = 32
+	}
+
+	if m.IdleTimeout == time.Duration(0)*time.Second {
+		m.logger.Info("IdleTimeout is not set, defaulting to 30 seconds")
+		m.IdleTimeout = 30 * time.Second
+	}
+
+	pc := &t1k.PoolConfig{
+		InitialCap:  m.InitialCap,
+		MaxIdle:     m.MaxIdle,
+		MaxCap:      m.MaxCap,
+		Factory:     &t1k.TcpFactory{Addr: m.WafEngineAddr},
+		IdleTimeout: m.IdleTimeout,
+	}
+
+	wafEngine, err := initDetect(pc)
 	if err != nil {
 		return fmt.Errorf("init detect error: %v", err)
 	}
@@ -88,47 +111,13 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 // logging relevant information in each case.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 
-	// result, err := m.wafEngine.DetectHttpRequest(r)
-	// if err != nil {
-	// 	m.logger.Error("DetectHttpRequest error", zap.Error(err))
-	// 	return next.ServeHTTP(w, r)
-	// }
-	// if result.Blocked() {
-	// 	return m.redirectIntercept(w, result)
-	// }
-	// return next.ServeHTTP(w, r)
-
-	resultCh := make(chan *detection.Result, 1)
-	errCh := make(chan error, 1)
-
-	go func() {
-		// TODO: Add logging for WAF processing duration
-		// start := time.Now()
-		// defer func() {
-		// 	// Log the total duration taken to process the request
-		// 	m.logger.Info("WAF detection processed", zap.Duration("duration", time.Since(start)))
-		// 	m.logger.Info("Processing", zap.String("request", r.Host), zap.String("path", r.URL.Path))
-		// }()
-
-		result, err := m.wafEngine.DetectHttpRequest(r)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		resultCh <- result
-	}()
-
-	select {
-	case result := <-resultCh:
-		if result.Blocked() {
-			return m.redirectIntercept(w, result)
-		}
-	case err := <-errCh:
+	result, err := m.wafEngine.DetectHttpRequest(r)
+	if err != nil {
 		m.logger.Error("DetectHttpRequest error", zap.String("request", r.Host), zap.String("path", r.URL.Path), zap.String("method", r.Method), zap.Error(err))
 		return next.ServeHTTP(w, r)
-	case <-time.After(m.Timeout):
-		m.logger.Error("DetectHttpRequest timeout", zap.String("request", r.Host), zap.String("path", r.URL.Path), zap.String("method", r.Method))
-		return next.ServeHTTP(w, r)
+	}
+	if result.Blocked() {
+		return m.redirectIntercept(w, result)
 	}
 	return next.ServeHTTP(w, r)
 }
@@ -136,7 +125,7 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 // Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
 func (m CaddyWAF) Cleanup() error {
 	if m.wafEngine != nil {
-		m.wafEngine.Close()
+		m.wafEngine.Release()
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
