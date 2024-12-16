@@ -9,8 +9,10 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 	route {
 		waf_chaitin {
 			waf_engine_addr 169.254.0.5:8000
-			pool_size 10
-			timeout 1000
+			initial_cap 1 # initial connection of the engine
+			max_idle 16 # max idle connections
+			max_cap 32 # max connections
+			idle_timeout 30 # connections idle timeout
 		}
 	}
 }
