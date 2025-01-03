@@ -1,9 +1,11 @@
 package caddy_waf_t1k
 
 import (
+	"net"
 	"strconv"
 	"time"
 
+	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -22,10 +24,23 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for nesting := d.Nesting(); d.NextBlock(nesting); {
 		switch d.Val() {
 		case "waf_engine_addr":
-			if !d.NextArg() {
+			args := d.RemainingArgs()
+			if len(args) == 0 {
 				return d.ArgErr()
 			}
-			m.WafEngineAddr = d.Val()
+			for _, addr := range args {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return d.Errf("invalid address format %q: %v", addr, err)
+				}
+				if net.ParseIP(host) == nil {
+					return d.Errf("invalid IP address: %s", host)
+				}
+				if _, err := strconv.Atoi(port); err != nil {
+					return d.Errf("invalid port number: %s", port)
+				}
+			}
+			m.WafEngineAddrs = args
 		case "initial_cap":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -62,6 +77,27 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid idle_timeout value: %v", err)
 			}
 			m.IdleTimeout = time.Duration(idleTimeout) * time.Second
+		case "lb_policy":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			if m.LoadBalancing != nil && m.LoadBalancing.SelectionPolicyRaw != nil {
+				return d.Err("load balancing selection policy already specified")
+			}
+			name := d.Val()
+			modID := "http.waf_chaitin.selection_policies." + name
+			unm, err := caddyfile.UnmarshalModule(d, modID)
+			if err != nil {
+				return err
+			}
+			sel, ok := unm.(Selector)
+			if !ok {
+				return d.Errf("module %s (%T) is not a waf_chaitin.Selector", modID, unm)
+			}
+			if m.LoadBalancing == nil {
+				m.LoadBalancing = new(LoadBalancing)
+			}
+			m.LoadBalancing.SelectionPolicyRaw = caddyconfig.JSONModuleObject(sel, "policy", name, nil)
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
@@ -73,7 +109,7 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 // syntax:
 //
 //	waf_chaitin {
-//	    waf_engine_addr 169.254.0.5:8000
+//	    waf_engine_addr 169.254.0.5:8000 169.254.0.6:8000 169.254.0.7:8000
 //		initial_cap 1
 //		max_idle 16
 //		max_cap 32

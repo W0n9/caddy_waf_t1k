@@ -18,15 +18,24 @@ func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
 
+type EnginePool []*t1k.ChannelPool
+
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
-	WafEngineAddr string `json:"waf_engine_addr,omitempty"` // WAF Engine address, expects a URL or IP address
-	logger        *zap.Logger
-	wafEngine     *t1k.ChannelPool
-	InitialCap    int           `json:"initial_cap,omitempty"`  // InitialCap is the initial capacity of the pool
-	MaxIdle       int           `json:"max_idle,omitempty"`     // MaxIdle is the maximum number of idle connections in the pool
-	MaxCap        int           `json:"max_cap,omitempty"`      // MaxCap is the maximum capacity of the pool
-	IdleTimeout   time.Duration `json:"idle_timeout,omitempty"` // IdleTimeout is the duration after which an idle connection is closed
+	logger *zap.Logger
+
+	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
+
+	// Multiple WAF engine pools
+	Engines EnginePool
+
+	// Load balancing distributes load/requests between backends.
+	LoadBalancing *LoadBalancing `json:"load_balancing,omitempty"`
+
+	InitialCap  int           `json:"initial_cap,omitempty"`  // InitialCap is the initial capacity of the pool
+	MaxIdle     int           `json:"max_idle,omitempty"`     // MaxIdle is the maximum number of idle connections in the pool
+	MaxCap      int           `json:"max_cap,omitempty"`      // MaxCap is the maximum capacity of the pool
+	IdleTimeout time.Duration `json:"idle_timeout,omitempty"` // IdleTimeout is the duration after which an idle connection is closed
 	// block_tpl_path string `json:"block_tpl_path"` // Block template path
 }
 
@@ -44,7 +53,7 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return server, err
+	return server, nil
 }
 
 // Provision sets up the WAF module.
@@ -52,8 +61,8 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 	m.logger.Info("Provisioning WAF plugin instance")
 
-	if m.WafEngineAddr == "" {
-		return fmt.Errorf("web application firewall engine address is required")
+	if len(m.WafEngineAddrs) == 0 {
+		return fmt.Errorf("WAF configuration error: no engine addresses specified")
 	}
 
 	if m.InitialCap == 0 {
@@ -76,33 +85,42 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		m.IdleTimeout = 30 * time.Second
 	}
 
-	pc := &t1k.PoolConfig{
-		InitialCap:  m.InitialCap,
-		MaxIdle:     m.MaxIdle,
-		MaxCap:      m.MaxCap,
-		Factory:     &t1k.TcpFactory{Addr: m.WafEngineAddr},
-		IdleTimeout: m.IdleTimeout,
+	if m.LoadBalancing != nil && m.LoadBalancing.SelectionPolicyRaw != nil {
+		mod, err := ctx.LoadModule(m.LoadBalancing, "SelectionPolicyRaw")
+		if err != nil {
+			return fmt.Errorf("loading load balancing selection policy: %s", err)
+		}
+		m.LoadBalancing.SelectionPolicy = mod.(Selector)
 	}
 
-	wafEngine, err := initDetect(pc)
-	if err != nil {
-		return fmt.Errorf("init detect error: %v", err)
+	// set up load balancing
+	if m.LoadBalancing == nil {
+		m.LoadBalancing = new(LoadBalancing)
+	}
+	if m.LoadBalancing.SelectionPolicy == nil {
+		m.LoadBalancing.SelectionPolicy = RandomSelection{}
 	}
 
-	m.wafEngine = wafEngine
-	if m.wafEngine == nil {
-		return fmt.Errorf("wafEngine initialization failed")
-	}
+	// Initialize multiple engines
+	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
+	for i, addr := range m.WafEngineAddrs {
+		pc := &t1k.PoolConfig{
+			InitialCap:  m.InitialCap,
+			MaxIdle:     m.MaxIdle,
+			MaxCap:      m.MaxCap,
+			Factory:     &t1k.TcpFactory{Addr: addr},
+			IdleTimeout: m.IdleTimeout,
+		}
 
+		engine, err := initDetect(pc)
+		if err != nil {
+			return fmt.Errorf("init detect error for %s: %v", addr, err)
+		}
+		m.Engines[i] = engine
+	}
 	m.logger.Info("WAF plugin instance Provisioned")
 	return nil
 }
-
-// // Validate validates the WAF module configuration.
-// func (m *CaddyWAF) Validate() error {
-// 	m.logger.Info("Validating WAF plugin configuration")
-// 	return nil
-// }
 
 // ServeHTTP processes incoming HTTP requests by utilizing the Caddy WAF engine to detect
 // potential threats. If a request is identified as malicious, it redirects the request to
@@ -111,9 +129,19 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 // logging relevant information in each case.
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 
-	result, err := m.wafEngine.DetectHttpRequest(r)
+	// choose an available WAF upstream
+	engine := m.LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)
+	if engine == nil {
+		return fmt.Errorf("no available WAF engine for request %s %s", r.Method, r.URL.Path)
+	}
+
+	result, err := engine.DetectHttpRequest(r)
 	if err != nil {
-		m.logger.Error("DetectHttpRequest error", zap.String("request", r.Host), zap.String("path", r.URL.Path), zap.String("method", r.Method), zap.Error(err))
+		m.logger.Error("DetectHttpRequest error",
+			zap.String("request", r.Host),
+			zap.String("path", r.URL.Path),
+			zap.String("method", r.Method),
+			zap.Error(err))
 		return next.ServeHTTP(w, r)
 	}
 	if result.Blocked() {
@@ -124,8 +152,10 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 // Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
 func (m CaddyWAF) Cleanup() error {
-	if m.wafEngine != nil {
-		m.wafEngine.Release()
+	for _, engine := range m.Engines {
+		if engine != nil {
+			engine.Release()
+		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
@@ -133,8 +163,7 @@ func (m CaddyWAF) Cleanup() error {
 
 // Interface guards
 var (
-	_ caddy.Provisioner = (*CaddyWAF)(nil)
-	// _ caddy.Validator             = (*CaddyWAF)(nil)
+	_ caddy.Provisioner           = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
 )
