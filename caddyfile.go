@@ -1,6 +1,7 @@
 package caddy_waf_t1k
 
 import (
+	"net"
 	"strconv"
 	"time"
 
@@ -26,6 +27,18 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			args := d.RemainingArgs()
 			if len(args) == 0 {
 				return d.ArgErr()
+			}
+			for _, addr := range args {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return d.Errf("invalid address format %q: %v", addr, err)
+				}
+				if net.ParseIP(host) == nil {
+					return d.Errf("invalid IP address: %s", host)
+				}
+				if _, err := strconv.Atoi(port); err != nil {
+					return d.Errf("invalid port number: %s", port)
+				}
 			}
 			m.WafEngineAddrs = args
 		case "initial_cap":
