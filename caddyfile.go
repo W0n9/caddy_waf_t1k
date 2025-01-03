@@ -96,7 +96,7 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 // syntax:
 //
 //	waf_chaitin {
-//	    waf_engine_addr 169.254.0.5:8000
+//	    waf_engine_addr 169.254.0.5:8000 169.254.0.6:8000 169.254.0.7:8000
 //		initial_cap 1
 //		max_idle 16
 //		max_cap 32
