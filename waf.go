@@ -109,7 +109,7 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 			MaxIdle:     m.MaxIdle,
 			MaxCap:      m.MaxCap,
 			Factory:     &t1k.TcpFactory{Addr: addr},
-			IdleTimeout: m.IdleTimeout,
+			IdleTimeout: time.Duration(m.IdleTimeout),
 		}
 
 		engine, err := initDetect(pc)

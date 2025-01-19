@@ -1,11 +1,11 @@
 module github.com/W0n9/caddy_waf_t1k
 
-go 1.23.1
+go 1.23.4
 
 replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.7
 
 require (
-	github.com/caddyserver/caddy/v2 v2.9.0
+	github.com/caddyserver/caddy/v2 v2.9.1
 	github.com/chaitin/t1k-go v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.27.0
 )
@@ -23,7 +23,7 @@ require (
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/aryann/difflib v0.0.0-20210328193216-ff5ff6dc229b // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/caddyserver/certmagic v0.21.5 // indirect
+	github.com/caddyserver/certmagic v0.21.6 // indirect
 	github.com/caddyserver/zerossl v0.1.3 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash v1.1.0 // indirect

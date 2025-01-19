@@ -12,7 +12,7 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 			initial_cap 1 # initial connection of the engine
 			max_idle 16 # max idle connections
 			max_cap 32 # max connections
-			idle_timeout 30 # connections idle timeout
+			idle_timeout 30s # connections idle timeout
 		}
 	}
 }
