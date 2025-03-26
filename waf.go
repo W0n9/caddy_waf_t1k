@@ -18,6 +18,22 @@ func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
 
+var engineStore = caddy.NewUsagePool()
+
+type engineWrapper struct {
+	*t1k.ChannelPool
+}
+
+func (ew *engineWrapper) Destruct() error {
+	ew.ChannelPool.Release()
+	return nil
+}
+
+// type EngineWithAddr struct {
+// 	Engine *t1k.ChannelPool
+// 	Addr   string
+// }
+
 type EnginePool []*t1k.ChannelPool
 
 // CaddyWAF implements an HTTP handler for WAF.
@@ -48,12 +64,13 @@ func (CaddyWAF) CaddyModule() caddy.ModuleInfo {
 }
 
 // initDetect initializes the WAF engine.
-func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
+// func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
+func initDetect(pc *t1k.PoolConfig) (caddy.Destructor, error) {
 	server, err := t1k.NewChannelPool(pc)
 	if err != nil {
 		return nil, err
 	}
-	return server, nil
+	return &engineWrapper{server}, nil
 }
 
 // Provision sets up the WAF module.
@@ -112,11 +129,15 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 			IdleTimeout: time.Duration(m.IdleTimeout),
 		}
 
-		engine, err := initDetect(pc)
+		// 修改Provision中的engine创建
+		engine, _, err := engineStore.LoadOrNew(addr, func() (caddy.Destructor, error) {
+			return initDetect(pc)
+		})
 		if err != nil {
 			return fmt.Errorf("init detect error for %s: %v", addr, err)
 		}
-		m.Engines[i] = engine
+		m.Engines[i] = engine.(*engineWrapper).ChannelPool
+		// engine.(*engineWrapper).
 	}
 	m.logger.Info("WAF plugin instance Provisioned")
 	return nil
@@ -154,7 +175,8 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 func (m CaddyWAF) Cleanup() error {
 	for _, engine := range m.Engines {
 		if engine != nil {
-			engine.Release()
+			// engine.Release()
+			engine.delete()
 		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
