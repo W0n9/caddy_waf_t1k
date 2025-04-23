@@ -3,8 +3,8 @@ package caddy_waf_t1k
 import (
 	"net"
 	"strconv"
-	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -72,11 +72,11 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			idleTimeout, err := strconv.Atoi(d.Val())
+			dur, err := caddy.ParseDuration(d.Val())
 			if err != nil {
 				return d.Errf("invalid idle_timeout value: %v", err)
 			}
-			m.IdleTimeout = time.Duration(idleTimeout) * time.Second
+			m.IdleTimeout = dur
 		case "lb_policy":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -113,7 +113,7 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //		initial_cap 1
 //		max_idle 16
 //		max_cap 32
-//		idle_timeout 30
+//		idle_timeout 30s
 //	}
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m CaddyWAF
