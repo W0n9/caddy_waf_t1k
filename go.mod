@@ -2,7 +2,7 @@ module github.com/W0n9/caddy_waf_t1k
 
 go 1.24
 
-replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.7
+replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.8
 
 require (
 	github.com/caddyserver/caddy/v2 v2.10.0
