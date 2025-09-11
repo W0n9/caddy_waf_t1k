@@ -3,7 +3,19 @@
 {
 	"name": "Go",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/go:1.4.0-1.24-bookworm"
+	"image": "mcr.microsoft.com/devcontainers/go:2.0.2-1.25-trixie",
+	// Set environment variables for Go proxy configuration to accelerate dependency downloads
+	// and ensure stability. goproxy.io is used as a reliable proxy for Go modules.
+	"containerEnv": {
+		"GOPROXY": "https://goproxy.cn,direct"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"RooVeterinaryInc.roo-cline"
+			]
+		}
+	}
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
