@@ -7,7 +7,7 @@ replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.8
 require (
 	github.com/caddyserver/caddy/v2 v2.10.2
 	github.com/chaitin/t1k-go v0.0.0-00010101000000-000000000000
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.27.1
 )
 
 require (
