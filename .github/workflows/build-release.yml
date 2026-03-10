@@ -130,8 +130,6 @@ jobs:
 
           mkdir -p "${staging_dir}"
           cp build/caddy "${staging_dir}/caddy"
-          cp 403.html "${staging_dir}/403.html"
-          cp Caddyfile "${staging_dir}/Caddyfile"
           cp README.md "${staging_dir}/README.md"
           cp License "${staging_dir}/License"
 
