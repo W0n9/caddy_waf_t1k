@@ -15,7 +15,7 @@ name: Build and Release
       - "v*"
 
 env:
-  GO_VERSION: "1.25.0"
+  GO_VERSION: "1.26.1"
   XCADDY_VERSION: "latest"
   RELEASE_NAME: caddy-waf-t1k
   CADDY_WAF_MODULE: github.com/W0n9/caddy_waf_t1k
