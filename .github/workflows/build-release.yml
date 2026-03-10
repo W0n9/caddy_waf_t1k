@@ -1,0 +1,156 @@
+name: Build and Release
+
+"on":
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Git ref to build for a manual release dry run
+        required: false
+        default: master
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+env:
+  GO_VERSION: "1.25.0"
+  XCADDY_VERSION: "latest"
+  RELEASE_NAME: caddy-waf-t1k
+  CADDY_WAF_MODULE: github.com/W0n9/caddy_waf_t1k
+
+jobs:
+  build:
+    name: Verify Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install xcaddy
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run Go compile checks
+        run: go test ./...
+
+      - name: Verify xcaddy build from current checkout
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          module_spec="${CADDY_WAF_MODULE}=${GITHUB_WORKSPACE}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            module_spec="${CADDY_WAF_MODULE}@${GITHUB_REF_NAME}=${GITHUB_WORKSPACE}"
+          fi
+
+          xcaddy build \
+            --with github.com/caddy-dns/duckdns \
+            --with github.com/caddyserver/replace-response \
+            --with "${module_spec}" \
+            --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest \
+            --output build/caddy-check
+
+          ./build/caddy-check list-modules | grep -F "http.handlers.waf_chaitin"
+
+  release:
+    name: Release Linux Binary
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install xcaddy
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@${XCADDY_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build release binary
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          package_version="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            package_version="manual-${{ github.run_number }}"
+          fi
+
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 xcaddy build \
+            --with github.com/caddy-dns/duckdns \
+            --with github.com/caddyserver/replace-response \
+            --with "${CADDY_WAF_MODULE}@${package_version}=${GITHUB_WORKSPACE}" \
+            --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest \
+            --output build/caddy
+
+      - name: Package release archive
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="${GITHUB_REF_NAME}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            package_version="manual-${{ github.run_number }}"
+          fi
+
+          archive_name="${RELEASE_NAME}_${package_version}_linux_amd64.tar.gz"
+          staging_dir="dist/${RELEASE_NAME}_${package_version}_linux_amd64"
+
+          mkdir -p "${staging_dir}"
+          cp build/caddy "${staging_dir}/caddy"
+          cp 403.html "${staging_dir}/403.html"
+          cp Caddyfile "${staging_dir}/Caddyfile"
+          cp README.md "${staging_dir}/README.md"
+          cp License "${staging_dir}/License"
+
+          tar -C dist -czf "dist/${archive_name}" "$(basename "${staging_dir}")"
+          sha256sum "dist/${archive_name}" > "dist/${archive_name}.sha256"
+
+      - name: Upload release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_number) || github.ref_name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
