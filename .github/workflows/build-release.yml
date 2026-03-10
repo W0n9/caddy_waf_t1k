@@ -139,7 +139,7 @@ jobs:
           sha256sum "dist/${archive_name}" > "dist/${archive_name}.sha256"
 
       - name: Upload release bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-bundle-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_number) || github.ref_name }}
           path: |
