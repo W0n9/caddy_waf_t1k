@@ -50,6 +50,7 @@ func (e *engineEntry) updateHealth(success bool, failureThreshold, recoveryThres
 				zap.Int32("fail_count", newFail))
 		}
 	}
+	setEngineHealthy(e.addr, e.healthy.Load())
 }
 
 // startHealthCheck starts a background goroutine that probes the engine via TCP dial.
