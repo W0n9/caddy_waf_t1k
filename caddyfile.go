@@ -77,6 +77,33 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid idle_timeout value: %v", err)
 			}
 			m.IdleTimeout = dur
+		case "health_check_interval":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			dur, err := caddy.ParseDuration(d.Val())
+			if err != nil {
+				return d.Errf("invalid health_check_interval value: %v", err)
+			}
+			m.HealthCheckInterval = caddy.Duration(dur)
+		case "failure_threshold":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid failure_threshold value: %v", err)
+			}
+			m.FailureThreshold = n
+		case "recovery_threshold":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid recovery_threshold value: %v", err)
+			}
+			m.RecoveryThreshold = n
 		case "lb_policy":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -114,6 +141,9 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //		max_idle 16
 //		max_cap 32
 //		idle_timeout 30s
+//	    health_check_interval 10s
+//	    failure_threshold 3
+//	    recovery_threshold 2
 //	}
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m CaddyWAF
