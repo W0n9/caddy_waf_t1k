@@ -55,10 +55,7 @@ func (e *engineEntry) updateHealth(success bool, failureThreshold, recoveryThres
 // startHealthCheck starts a background goroutine that probes the engine via TCP dial.
 // The goroutine exits when ctx is cancelled.
 func (e *engineEntry) startHealthCheck(ctx context.Context, interval time.Duration, failureThreshold, recoveryThreshold int32, logger *zap.Logger) {
-	dialTimeout := interval / 2
-	if dialTimeout < 500*time.Millisecond {
-		dialTimeout = 500 * time.Millisecond
-	}
+	dialTimeout := max(interval/2, 500*time.Millisecond)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
