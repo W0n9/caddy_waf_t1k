@@ -173,6 +173,14 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 
+	if m.BotDetect && result.BotDetected() {
+		stripBotCookies(r)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(result.BotBody)
+		recordRequest("bot_challenge")
+		return nil
+	}
+
 	if result.Blocked() {
 		if m.LogBlockedRequests {
 			m.logger.Warn("WAF blocked request",

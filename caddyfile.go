@@ -159,6 +159,18 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			default:
 				return d.Errf("log_blocked_requests must be on or off, got %q", d.Val())
 			}
+		case "bot_detect":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			switch d.Val() {
+			case "on":
+				m.BotDetect = true
+			case "off":
+				m.BotDetect = false
+			default:
+				return d.Errf("bot_detect must be on or off, got %q", d.Val())
+			}
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
