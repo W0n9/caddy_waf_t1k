@@ -1,8 +1,10 @@
 package caddy_waf_t1k
 
 import (
+	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -125,6 +127,38 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				m.LoadBalancing = new(LoadBalancing)
 			}
 			m.LoadBalancing.SelectionPolicyRaw = caddyconfig.JSONModuleObject(sel, "policy", name, nil)
+		case "skip_content_types":
+			args := d.RemainingArgs()
+			if len(args) == 0 {
+				return d.ArgErr()
+			}
+			m.SkipContentTypes = args
+		case "skip_header":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.SkipHeader = d.Val()
+		case "max_body_size":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			n, err := parseByteSize(d.Val())
+			if err != nil {
+				return d.Errf("invalid max_body_size value: %v", err)
+			}
+			m.MaxBodyBytes = n
+		case "log_blocked_requests":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			switch d.Val() {
+			case "on":
+				m.LogBlockedRequests = true
+			case "off":
+				m.LogBlockedRequests = false
+			default:
+				return d.Errf("log_blocked_requests must be on or off, got %q", d.Val())
+			}
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
@@ -149,4 +183,31 @@ func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 	var m CaddyWAF
 	err := m.UnmarshalCaddyfile(h.Dispenser)
 	return m, err
+}
+
+// parseByteSize parses human-readable byte sizes like "1MB", "512KB", "1073741824".
+func parseByteSize(s string) (int64, error) {
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n, nil
+	}
+	suffixes := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"GB", 1024 * 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"KB", 1024},
+	}
+	upper := strings.ToUpper(s)
+	for _, sf := range suffixes {
+		if strings.HasSuffix(upper, sf.suffix) {
+			numStr := s[:len(s)-len(sf.suffix)]
+			n, err := strconv.ParseInt(strings.TrimSpace(numStr), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid byte size %q: %v", s, err)
+			}
+			return n * sf.mult, nil
+		}
+	}
+	return 0, fmt.Errorf("unrecognized byte size format %q (use KB, MB, GB or plain bytes)", s)
 }

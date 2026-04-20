@@ -131,6 +131,8 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		)
 	}
 
+	initWAFMetrics(ctx.GetMetricsRegistry())
+
 	m.logger.Info("WAF plugin instance Provisioned",
 		zap.Strings("engine_addrs", m.WafEngineAddrs))
 	return nil
@@ -139,10 +141,27 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	entry := m.LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)
 	if entry == nil {
+		recordRequest("error")
 		return fmt.Errorf("no available WAF engine for request %s %s", r.Method, r.URL.Path)
 	}
 
+	fr := checkFilter(r, m.SkipContentTypes, m.SkipHeader, m.MaxBodyBytes)
+	if fr == filterSkipAll {
+		recordRequest("skipped")
+		return next.ServeHTTP(w, r)
+	}
+	if fr == filterSkipBody {
+		rCopy := r.Clone(r.Context())
+		rCopy.Body = http.NoBody
+		rCopy.ContentLength = 0
+		r = rCopy
+	}
+
+	start := time.Now()
 	result, err := entry.engine.DetectHttpRequest(r)
+	elapsed := time.Since(start)
+	recordDetectDuration(elapsed.Seconds())
+
 	if err != nil {
 		m.logger.Error("DetectHttpRequest error",
 			zap.String("engine_addr", entry.addr),
@@ -150,11 +169,22 @@ func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			zap.String("path", r.URL.Path),
 			zap.String("method", r.Method),
 			zap.Error(err))
+		recordRequest("error")
 		return next.ServeHTTP(w, r)
 	}
+
 	if result.Blocked() {
+		if m.LogBlockedRequests {
+			m.logger.Warn("WAF blocked request",
+				zap.String("event_id", result.EventID()),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("path", r.URL.Path))
+		}
+		recordRequest("blocked")
 		return m.redirectIntercept(w, result)
 	}
+
+	recordRequest("allowed")
 	return next.ServeHTTP(w, r)
 }
 
