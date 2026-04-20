@@ -18,7 +18,7 @@ type detector interface {
 }
 
 type engineEntry struct {
-	pool      detector
+	engine    detector
 	addr      string
 	healthy   atomic.Bool
 	failCount atomic.Int32
@@ -26,7 +26,7 @@ type engineEntry struct {
 }
 
 func newEngineEntry(pool *t1k.ChannelPool, addr string) *engineEntry {
-	e := &engineEntry{pool: pool, addr: addr}
+	e := &engineEntry{engine: pool, addr: addr}
 	e.healthy.Store(true)
 	return e
 }
@@ -37,16 +37,14 @@ func (e *engineEntry) updateHealth(success bool, failureThreshold, recoveryThres
 	if success {
 		e.failCount.Store(0)
 		newOK := e.okCount.Add(1)
-		if !e.healthy.Load() && newOK >= recoveryThreshold {
-			e.healthy.Store(true)
-			logger.Warn("WAF engine recovered",
+		if newOK >= recoveryThreshold && e.healthy.CompareAndSwap(false, true) {
+			logger.Info("WAF engine recovered",
 				zap.String("engine_addr", e.addr))
 		}
 	} else {
 		e.okCount.Store(0)
 		newFail := e.failCount.Add(1)
-		if e.healthy.Load() && newFail >= failureThreshold {
-			e.healthy.Store(false)
+		if newFail >= failureThreshold && e.healthy.CompareAndSwap(true, false) {
 			logger.Warn("WAF engine marked unhealthy",
 				zap.String("engine_addr", e.addr),
 				zap.Int32("fail_count", newFail))
@@ -57,6 +55,10 @@ func (e *engineEntry) updateHealth(success bool, failureThreshold, recoveryThres
 // startHealthCheck starts a background goroutine that probes the engine via TCP dial.
 // The goroutine exits when ctx is cancelled.
 func (e *engineEntry) startHealthCheck(ctx context.Context, interval time.Duration, failureThreshold, recoveryThreshold int32, logger *zap.Logger) {
+	dialTimeout := interval / 2
+	if dialTimeout < 500*time.Millisecond {
+		dialTimeout = 500 * time.Millisecond
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -65,7 +67,7 @@ func (e *engineEntry) startHealthCheck(ctx context.Context, interval time.Durati
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				conn, err := net.DialTimeout("tcp", e.addr, 2*time.Second)
+				conn, err := net.DialTimeout("tcp", e.addr, dialTimeout)
 				if err == nil {
 					conn.Close()
 					e.updateHealth(true, failureThreshold, recoveryThreshold, logger)

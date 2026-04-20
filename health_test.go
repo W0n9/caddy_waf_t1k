@@ -27,7 +27,6 @@ func TestUpdateHealth_Recovery(t *testing.T) {
 	logger := zap.NewNop()
 	e := &engineEntry{addr: "127.0.0.1:8000"}
 	e.healthy.Store(false)
-	e.failCount.Store(3)
 
 	e.updateHealth(true, 3, 2, logger)
 	if e.healthy.Load() {
