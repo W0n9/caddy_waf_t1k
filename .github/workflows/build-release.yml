@@ -65,7 +65,6 @@ jobs:
             --with github.com/caddy-dns/duckdns \
             --with github.com/caddyserver/replace-response \
             --with "${module_spec}" \
-            --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest \
             --output build/caddy-check
 
           ./build/caddy-check list-modules | grep -F "http.handlers.waf_chaitin"
@@ -112,7 +111,6 @@ jobs:
             --with github.com/caddy-dns/duckdns \
             --with github.com/caddyserver/replace-response \
             --with "${CADDY_WAF_MODULE}@${package_version}=${GITHUB_WORKSPACE}" \
-            --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest \
             --output build/caddy
 
       - name: Package release archive
