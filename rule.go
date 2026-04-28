@@ -11,9 +11,10 @@ import (
 // redirectIntercept Intercept request
 func (m *CaddyWAF) redirectIntercept(w http.ResponseWriter, result *detection.Result) error {
 	// var tpl *template.Template
+	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Event-ID", result.EventID())
 	w.WriteHeader(http.StatusNotImplemented)
-	BlockMessage := map[string]interface{}{
+	BlockMessage := map[string]any{
 		"message":  "Intercept illegal requests",
 		"event_id": result.EventID(),
 	}
