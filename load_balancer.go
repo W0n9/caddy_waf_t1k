@@ -2,13 +2,12 @@ package caddy_waf_t1k
 
 import (
 	"encoding/json"
-	weakrand "math/rand"
+	weakrand "math/rand/v2"
 	"net/http"
 	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/chaitin/t1k-go"
 )
 
 func init() {
@@ -27,7 +26,7 @@ type LoadBalancing struct {
 
 // Selector selects an available upstream from the pool.
 type Selector interface {
-	Select(EnginePool, *http.Request, http.ResponseWriter) *t1k.ChannelPool
+	Select(EnginePool, *http.Request, http.ResponseWriter) *Engine
 }
 
 // RandomSelection is a policy that selects
@@ -43,7 +42,7 @@ func (RandomSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Select returns an available host, if any.
-func (r RandomSelection) Select(pool EnginePool, request *http.Request, _ http.ResponseWriter) *t1k.ChannelPool {
+func (r RandomSelection) Select(pool EnginePool, request *http.Request, _ http.ResponseWriter) *Engine {
 	return selectRandomHost(pool)
 }
 
@@ -57,14 +56,15 @@ func (r *RandomSelection) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 }
 
 // selectRandomHost returns a random available host
-func selectRandomHost(pool []*t1k.ChannelPool) *t1k.ChannelPool {
-	// use reservoir sampling because the number of available
-	// hosts isn't known: https://en.wikipedia.org/wiki/Reservoir_sampling
-	var randomHost *t1k.ChannelPool
+func selectRandomHost(pool []*Engine) *Engine {
+	var randomHost *Engine
 	var count int
 	for _, upstream := range pool {
+		if !upstream.Available() {
+			continue
+		}
 		count++
-		if (weakrand.Int() % count) == 0 { //nolint:gosec
+		if weakrand.IntN(count) == 0 { //nolint:gosec
 			randomHost = upstream
 		}
 	}
@@ -86,14 +86,19 @@ func (RoundRobinSelection) CaddyModule() caddy.ModuleInfo {
 }
 
 // Select returns an available host, if any.
-func (r *RoundRobinSelection) Select(pool EnginePool, _ *http.Request, _ http.ResponseWriter) *t1k.ChannelPool {
+func (r *RoundRobinSelection) Select(pool EnginePool, _ *http.Request, _ http.ResponseWriter) *Engine {
 	n := uint32(len(pool))
 	if n == 0 {
 		return nil
 	}
 	robin := atomic.AddUint32(&r.robin, 1)
-	host := pool[robin%n]
-	return host
+	for i := range n {
+		host := pool[(robin+i)%n]
+		if host.Available() {
+			return host
+		}
+	}
+	return nil
 }
 
 // UnmarshalCaddyfile sets up the module from Caddyfile tokens.

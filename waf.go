@@ -3,9 +3,12 @@ package caddy_waf_t1k
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chaitin/t1k-go"
+	"github.com/chaitin/t1k-go/detection"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -18,11 +21,39 @@ func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
 
-type EnginePool []*t1k.ChannelPool
+// Engine wraps a t1k.ChannelPool with per-engine health state.
+type Engine struct {
+	pool     *t1k.ChannelPool
+	addr     string
+	fails    int64 // atomic: unexpired failure count
+	maxFails int
+}
+
+func (e *Engine) DetectHttpRequest(r *http.Request) (*detection.Result, error) {
+	return e.pool.DetectHttpRequest(r)
+}
+
+func (e *Engine) Fails() int {
+	return int(atomic.LoadInt64(&e.fails))
+}
+
+func (e *Engine) countFail(delta int) {
+	atomic.AddInt64(&e.fails, int64(delta))
+}
+
+func (e *Engine) Available() bool {
+	if e.maxFails <= 0 {
+		return true
+	}
+	return e.Fails() < e.maxFails
+}
+
+type EnginePool []*Engine
 
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
 	logger *zap.Logger
+	ctx    caddy.Context
 
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
@@ -32,11 +63,13 @@ type CaddyWAF struct {
 	// Load balancing distributes load/requests between backends.
 	LoadBalancing *LoadBalancing `json:"load_balancing,omitempty"`
 
-	InitialCap  int           `json:"initial_cap,omitempty"`  // InitialCap is the initial capacity of the pool
-	MaxIdle     int           `json:"max_idle,omitempty"`     // MaxIdle is the maximum number of idle connections in the pool
-	MaxCap      int           `json:"max_cap,omitempty"`      // MaxCap is the maximum capacity of the pool
-	IdleTimeout time.Duration `json:"idle_timeout,omitempty"` // IdleTimeout is the duration after which an idle connection is closed
-	// block_tpl_path string `json:"block_tpl_path"` // Block template path
+	InitialCap  int           `json:"initial_cap,omitempty"`
+	MaxIdle     int           `json:"max_idle,omitempty"`
+	MaxCap      int           `json:"max_cap,omitempty"`
+	IdleTimeout time.Duration `json:"idle_timeout,omitempty"`
+
+	HealthFailDuration caddy.Duration `json:"health_fail_duration,omitempty"`
+	HealthMaxFails     int            `json:"health_max_fails,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -59,6 +92,7 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 // Provision sets up the WAF module.
 func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
+	m.ctx = ctx
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if len(m.WafEngineAddrs) == 0 {
@@ -101,6 +135,10 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		m.LoadBalancing.SelectionPolicy = RandomSelection{}
 	}
 
+	if m.HealthMaxFails == 0 {
+		m.HealthMaxFails = 1
+	}
+
 	// Initialize multiple engines
 	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
 	for i, addr := range m.WafEngineAddrs {
@@ -116,9 +154,17 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return fmt.Errorf("init detect error for %s: %v", addr, err)
 		}
-		m.Engines[i] = engine
+		m.Engines[i] = &Engine{
+			pool:     engine,
+			addr:     addr,
+			maxFails: m.HealthMaxFails,
+		}
 	}
 	m.logger.Info("WAF plugin instance Provisioned")
+
+	initWAFMetrics(ctx.GetMetricsRegistry())
+	newMetricsEnginesHealthyUpdater(m).start()
+
 	return nil
 }
 
@@ -127,43 +173,97 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 // an intercept handler. Otherwise, it passes the request to the next handler in the chain.
 // The method handles detection errors and enforces a timeout for the detection process,
 // logging relevant information in each case.
-func (m CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-
-	// choose an available WAF upstream
+func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	engine := m.LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)
 	if engine == nil {
-		return fmt.Errorf("no available WAF engine for request %s %s", r.Method, r.URL.Path)
+		m.logger.Warn("all WAF engines unavailable, request passed through",
+			zap.String("path", r.URL.Path),
+			zap.String("method", r.Method))
+		wafMetrics.requestsTotal.WithLabelValues("failopen").Inc()
+		return next.ServeHTTP(w, r)
 	}
 
+	start := time.Now()
 	result, err := engine.DetectHttpRequest(r)
+	wafMetrics.detectDuration.WithLabelValues(engine.addr).Observe(time.Since(start).Seconds())
+
 	if err != nil {
-		m.logger.Error("DetectHttpRequest error",
-			zap.String("request", r.Host),
-			zap.String("path", r.URL.Path),
-			zap.String("method", r.Method),
-			zap.Error(err))
+		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+		if isEngineError(err) {
+			m.logger.Error("DetectHttpRequest engine error",
+				zap.String("engine", engine.addr),
+				zap.String("request", r.Host),
+				zap.String("path", r.URL.Path),
+				zap.String("method", r.Method),
+				zap.Error(err))
+			m.countFailure(engine)
+		} else {
+			m.logger.Warn("DetectHttpRequest client error",
+				zap.String("request", r.Host),
+				zap.String("path", r.URL.Path),
+				zap.String("method", r.Method),
+				zap.Error(err))
+		}
 		return next.ServeHTTP(w, r)
 	}
 	if result.Blocked() {
+		wafMetrics.requestsTotal.WithLabelValues("blocked").Inc()
 		return m.redirectIntercept(w, result)
 	}
+	wafMetrics.requestsTotal.WithLabelValues("passed").Inc()
 	return next.ServeHTTP(w, r)
 }
 
 // Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
-func (m CaddyWAF) Cleanup() error {
+func (m *CaddyWAF) Cleanup() error {
 	for _, engine := range m.Engines {
 		if engine != nil {
-			engine.Release()
+			engine.pool.Release()
 		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
 }
 
+var clientErrorPatterns = []string{
+	"H3_REQUEST_CANCELLED",
+	"H3 error",
+	"client disconnected",
+	"keepalive limit reached",
+	"connection reset by peer",
+	"timeout: no recent network activity",
+	"empty hex number for chunk length",
+	"context canceled",
+	"request canceled",
+}
+
+func isEngineError(err error) bool {
+	msg := err.Error()
+	for _, pattern := range clientErrorPatterns {
+		if strings.Contains(msg, pattern) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *CaddyWAF) countFailure(engine *Engine) {
+	failDuration := time.Duration(m.HealthFailDuration)
+	if failDuration == 0 {
+		return
+	}
+	engine.countFail(1)
+	go func() {
+		timer := time.NewTimer(failDuration)
+		<-timer.C
+		engine.countFail(-1)
+	}()
+}
+
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*CaddyWAF)(nil)
+	_ caddy.CleanerUpper          = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
 )

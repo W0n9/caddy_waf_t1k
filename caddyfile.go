@@ -98,6 +98,24 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				m.LoadBalancing = new(LoadBalancing)
 			}
 			m.LoadBalancing.SelectionPolicyRaw = caddyconfig.JSONModuleObject(sel, "policy", name, nil)
+		case "health_fail_duration":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			dur, err := caddy.ParseDuration(d.Val())
+			if err != nil {
+				return d.Errf("invalid health_fail_duration value: %v", err)
+			}
+			m.HealthFailDuration = caddy.Duration(dur)
+		case "health_max_fails":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			maxFails, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid health_max_fails value: %v", err)
+			}
+			m.HealthMaxFails = maxFails
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}
@@ -118,5 +136,5 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func parseCaddyfileHandler(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var m CaddyWAF
 	err := m.UnmarshalCaddyfile(h.Dispenser)
-	return m, err
+	return &m, err
 }
