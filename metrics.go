@@ -46,14 +46,27 @@ func initWAFMetrics(registry *prometheus.Registry) {
 		}, []string{"engine"})
 	})
 
-	for _, collector := range []prometheus.Collector{
-		wafMetrics.requestsTotal,
-		wafMetrics.detectDuration,
-		wafMetrics.enginesHealthy,
+	logger := caddy.Log().Named("waf.metrics")
+	for _, metric := range []struct {
+		name      string
+		collector prometheus.Collector
+	}{
+		{name: "requests_total", collector: wafMetrics.requestsTotal},
+		{name: "detect_duration_seconds", collector: wafMetrics.detectDuration},
+		{name: "engines_healthy", collector: wafMetrics.enginesHealthy},
 	} {
-		if err := registry.Register(collector); err != nil &&
-			!errors.As(err, &prometheus.AlreadyRegisteredError{}) {
-			panic(err)
+		if err := registry.Register(metric.collector); err != nil {
+			var alreadyRegisteredErr prometheus.AlreadyRegisteredError
+			if errors.As(err, &alreadyRegisteredErr) {
+				continue
+			}
+
+			if c := logger.Check(zap.WarnLevel, "failed to register WAF metric collector"); c != nil {
+				c.Write(
+					zap.String("metric", metric.name),
+					zap.Error(err),
+				)
+			}
 		}
 	}
 }
