@@ -8,7 +8,7 @@ require (
 	github.com/caddyserver/caddy/v2 v2.11.2
 	github.com/chaitin/t1k-go v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.23.2
-	go.uber.org/zap v1.27.1
+	go.uber.org/zap v1.28.0
 )
 
 require (
