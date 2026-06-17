@@ -48,6 +48,10 @@ func (e *Engine) Available() bool {
 	return e.Fails() < e.maxFails
 }
 
+func (e *Engine) poolStats() t1k.PoolStats {
+	return e.pool.Stats()
+}
+
 type EnginePool []*Engine
 
 // CaddyWAF implements an HTTP handler for WAF.
@@ -163,7 +167,7 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger.Info("WAF plugin instance Provisioned")
 
 	initWAFMetrics(ctx.GetMetricsRegistry())
-	newMetricsEnginesHealthyUpdater(m).start()
+	newMetricsPoolUpdater(m).start()
 
 	return nil
 }
@@ -189,6 +193,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 	if err != nil {
 		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+		recordConnectionError(engine.addr, classifyConnectionError(err))
 		if isEngineError(err) {
 			m.logger.Error("DetectHttpRequest engine error",
 				zap.String("engine", engine.addr),
