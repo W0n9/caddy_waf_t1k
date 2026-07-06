@@ -231,6 +231,7 @@ func (m *CaddyWAF) Cleanup() error {
 }
 
 var clientErrorPatterns = []string{
+	"read request body", // Body() 客户端读体错误（unexpected EOF / H2 stream CANCEL / H3 QUIC blackhole 等）
 	"H3_REQUEST_CANCELLED",
 	"H3 error",
 	"client disconnected",

@@ -29,6 +29,10 @@ func TestIsEngineError(t *testing.T) {
 		{"chunked encoding error is client error", errors.New("empty hex number for chunk length"), false},
 		{"context canceled is client error", errors.New("context canceled"), false},
 		{"request canceled is client error", errors.New("request canceled"), false},
+
+		{"client body unexpected EOF is client error", errors.New("read request body: unexpected EOF"), false},
+		{"client body stream cancel is client error", errors.New("read request body: stream error: stream ID 1; CANCEL"), false},
+		{"engine-side unexpected EOF stays engine error", errors.New("unexpected EOF"), true},
 	}
 
 	for _, tt := range tests {
