@@ -33,6 +33,84 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 xcaddy build --with github.com/W0n9/caddy_waf_t1k --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest
 ```
 
+Local development (uses `src/t1k-go` checkout):
+
+```
+xcaddy build \
+  --with github.com/W0n9/caddy_waf_t1k=. \
+  --replace github.com/chaitin/t1k-go=./src/t1k-go \
+  --output ./build/caddy
+```
+
+# Prometheus metrics
+
+The plugin registers metrics on Caddy's metrics registry. Expose them for scraping:
+
+```caddyfile
+:9090 {
+    metrics /metrics
+}
+```
+
+Or scrape the Admin API: `GET http://localhost:2019/metrics`
+
+**Request metrics**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `caddy_waf_requests_total` | `action` | blocked / passed / error / failopen |
+| `caddy_waf_detect_duration_seconds` | `engine` | WAF detection latency |
+
+**Engine health & connection pool** (updated every 10s)
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `caddy_waf_engines_healthy` | `engine` | 1=healthy, 0=unhealthy |
+| `caddy_waf_pool_idle_conns` | `engine` | Idle TCP connections |
+| `caddy_waf_pool_active_conns` | `engine` | Active TCP connections |
+| `caddy_waf_pool_max_conns` | `engine` | Configured max connections |
+| `caddy_waf_pool_waiting_requests` | `engine` | Requests waiting for a connection |
+
+**Connection errors & pool events**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `caddy_waf_connection_errors_total` | `engine`, `reason` | Detect errors (connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other) |
+| `caddy_waf_pool_events_total` | `engine`, `reason` | Pool lifecycle (dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit) |
+
+**Example PromQL**
+
+```promql
+# Connection pool utilization
+caddy_waf_pool_active_conns / caddy_waf_pool_max_conns
+
+# Engine unhealthy
+caddy_waf_engines_healthy == 0
+
+# Connection error rate
+rate(caddy_waf_connection_errors_total[5m])
+```
+
+**Example alert rules**
+
+```yaml
+- alert: WAFEngineUnhealthy
+  expr: caddy_waf_engines_healthy == 0
+  for: 1m
+
+- alert: WAFPoolSaturated
+  expr: caddy_waf_pool_active_conns / caddy_waf_pool_max_conns > 0.9
+  for: 5m
+
+- alert: WAFPoolWaiting
+  expr: caddy_waf_pool_waiting_requests > 0
+  for: 2m
+
+- alert: WAFConnectionErrors
+  expr: rate(caddy_waf_connection_errors_total[5m]) > 0.1
+  for: 3m
+```
+
 # TODO
 - [x] Detection and Interception  
 - [x]  Pass the `remote_addr` to the Engine  

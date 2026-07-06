@@ -2,7 +2,7 @@ module github.com/W0n9/caddy_waf_t1k
 
 go 1.26.0
 
-replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.9
+replace github.com/chaitin/t1k-go => github.com/w0n9/t1k-go v1.5.10
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.4
@@ -64,6 +64,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

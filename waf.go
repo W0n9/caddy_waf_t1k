@@ -48,6 +48,10 @@ func (e *Engine) Available() bool {
 	return e.Fails() < e.maxFails
 }
 
+func (e *Engine) poolStats() t1k.PoolStats {
+	return e.pool.Stats()
+}
+
 type EnginePool []*Engine
 
 // CaddyWAF implements an HTTP handler for WAF.
@@ -163,7 +167,7 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger.Info("WAF plugin instance Provisioned")
 
 	initWAFMetrics(ctx.GetMetricsRegistry())
-	newMetricsEnginesHealthyUpdater(m).start()
+	newMetricsPoolUpdater(m).start()
 
 	return nil
 }
@@ -189,6 +193,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 	if err != nil {
 		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+		recordConnectionError(engine.addr, classifyConnectionError(err))
 		if isEngineError(err) {
 			m.logger.Error("DetectHttpRequest engine error",
 				zap.String("engine", engine.addr),
@@ -226,6 +231,7 @@ func (m *CaddyWAF) Cleanup() error {
 }
 
 var clientErrorPatterns = []string{
+	"read request body", // Body() 客户端读体错误（unexpected EOF / H2 stream CANCEL / H3 QUIC blackhole 等）
 	"H3_REQUEST_CANCELLED",
 	"H3 error",
 	"client disconnected",

@@ -22,7 +22,7 @@ xcaddy build \
 # Build from local checkout (development)
 xcaddy build \
   --with github.com/W0n9/caddy_waf_t1k=. \
-  --replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest \
+  --replace github.com/chaitin/t1k-go=./src/t1k-go \
   --output ./build/caddy
 ```
 
@@ -45,7 +45,7 @@ go mod verify
 
 ## Architecture
 
-Four source files form the entire plugin:
+Four core source files plus metrics/error helpers:
 
 | File | Responsibility |
 |------|---------------|
@@ -53,7 +53,8 @@ Four source files form the entire plugin:
 | `caddyfile.go` | Caddyfile directive parsing (`waf_chaitin { ... }`) |
 | `load_balancer.go` | `Selector` interface + `RandomSelection` / `RoundRobinSelection` implementations (skip unhealthy engines) |
 | `rule.go` | `redirectIntercept` — writes the block response when a request is flagged |
-| `metrics.go` | Prometheus metrics registration and engine health gauge updater |
+| `metrics.go` | Prometheus metrics registration and pool/health gauge updater (10s) |
+| `errors.go` | `classifyConnectionError` — maps Detect errors to Prometheus `reason` labels |
 
 **Request flow:**  
 `ServeHTTP` → pick engine via `LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)` (skips unhealthy engines) → if all engines unavailable, fail-open → `engine.DetectHttpRequest(r)` → if error, classify via `isEngineError()`: engine errors trigger `countFailure()` (logged as error), client errors are logged as warn; both fail-open → if `result.Blocked()` call `redirectIntercept`, else call `next.ServeHTTP`.
@@ -68,16 +69,29 @@ On engine error, `countFailure()` atomically increments the engine's fail counte
 Blocked requests set `Content-Type: application/json`, `X-Event-ID`, return HTTP 501, and write `{"message":"Intercept illegal requests","event_id":"..."}` JSON from `redirectIntercept`.
 
 **Prometheus metrics:**  
+Request / detection:
 - `caddy_waf_requests_total{action}` — counter (blocked/passed/error/failopen)
 - `caddy_waf_detect_duration_seconds{engine}` — histogram
-- `caddy_waf_engines_healthy{engine}` — gauge (1=healthy, 0=unhealthy), updated every 10s
+
+Engine health & connection pool (refreshed every 10s):
+- `caddy_waf_engines_healthy{engine}` — gauge (1=healthy, 0=unhealthy)
+- `caddy_waf_pool_idle_conns{engine}` — gauge
+- `caddy_waf_pool_active_conns{engine}` — gauge
+- `caddy_waf_pool_max_conns{engine}` — gauge
+- `caddy_waf_pool_waiting_requests{engine}` — gauge
+
+Connection errors & pool events:
+- `caddy_waf_connection_errors_total{engine,reason}` — counter (Detect-layer errors: connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other)
+- `caddy_waf_pool_events_total{engine,reason}` — counter (pool lifecycle: dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit)
+
+Scrape via Caddy `metrics` handler or Admin API `/metrics`. See README for examples.
 
 **Engine pool:**  
 Each address in `waf_engine_addrs` gets its own `t1k.ChannelPool` (a TCP connection pool to one SafeLine engine). The pool settings (`initial_cap`, `max_idle`, `max_cap`, `idle_timeout`) are shared across all pools.
 
 ## Important: Module Replace Directive
 
-`go.mod` replaces the upstream `github.com/chaitin/t1k-go` with a fork `github.com/w0n9/t1k-go`. This must be carried through in every `xcaddy build` call via `--replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest`. Forgetting this flag causes a build failure.
+`go.mod` replaces the upstream `github.com/chaitin/t1k-go` with the local checkout at `./src/t1k-go` for development. For release builds, use `--replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest` (or a pinned tag). Forgetting this flag causes a build failure.
 
 ## Caddyfile Configuration Reference
 
