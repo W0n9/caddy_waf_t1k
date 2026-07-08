@@ -24,16 +24,16 @@ var poolEventReasonNames = [poolEventReasons]string{
 }
 
 var wafMetrics = struct {
-	once              sync.Once
-	requestsTotal     *prometheus.CounterVec
-	detectDuration    *prometheus.HistogramVec
-	enginesHealthy    *prometheus.GaugeVec
-	poolIdleConns     *prometheus.GaugeVec
-	poolActiveConns   *prometheus.GaugeVec
-	poolMaxConns      *prometheus.GaugeVec
-	poolWaitingReqs   *prometheus.GaugeVec
-	connectionErrors  *prometheus.CounterVec
-	poolEvents        *prometheus.CounterVec
+	once             sync.Once
+	requestsTotal    *prometheus.CounterVec
+	detectDuration   *prometheus.HistogramVec
+	enginesHealthy   *prometheus.GaugeVec
+	poolIdleConns    *prometheus.GaugeVec
+	poolActiveConns  *prometheus.GaugeVec
+	poolMaxConns     *prometheus.GaugeVec
+	poolWaitingReqs  *prometheus.GaugeVec
+	connectionErrors *prometheus.CounterVec
+	poolEvents       *prometheus.CounterVec
 }{}
 
 func initWAFMetrics(registry *prometheus.Registry) {
@@ -226,8 +226,8 @@ func (u *metricsPoolUpdater) syncPoolEvents(addr string, stats t1k.PoolStats) {
 		}
 		delta := float64(current[i] - state.last[i])
 		wafMetrics.poolEvents.With(prometheus.Labels{
-			"engine":   addr,
-			"reason":   reason,
+			"engine":       addr,
+			"reason":       reason,
 			"waf_instance": u.instanceID,
 		}).Add(delta)
 		state.last[i] = current[i]
@@ -236,8 +236,8 @@ func (u *metricsPoolUpdater) syncPoolEvents(addr string, stats t1k.PoolStats) {
 
 func recordConnectionError(engine, instance, reason string) {
 	wafMetrics.connectionErrors.With(prometheus.Labels{
-		"engine":   engine,
-		"reason":   reason,
+		"engine":       engine,
+		"reason":       reason,
 		"waf_instance": instance,
 	}).Inc()
 }
