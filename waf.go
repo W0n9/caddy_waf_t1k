@@ -3,6 +3,7 @@ package caddy_waf_t1k
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,11 @@ import (
 func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
+
+// instanceSeq assigns a stable, app-lifetime-unique id to each CaddyWAF
+// instance so metrics can distinguish per-instance pools when the same
+// waf_chaitin directive is provisioned many times.
+var instanceSeq int64
 
 // Engine wraps a t1k.ChannelPool with per-engine health state.
 type Engine struct {
@@ -59,6 +65,8 @@ type CaddyWAF struct {
 	logger *zap.Logger
 	ctx    caddy.Context
 
+	instanceID string // stable per-instance id for prometheus instance label
+
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
 	// Multiple WAF engine pools
@@ -97,6 +105,7 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 	m.ctx = ctx
+	m.instanceID = strconv.FormatInt(atomic.AddInt64(&instanceSeq, 1), 10)
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if len(m.WafEngineAddrs) == 0 {
