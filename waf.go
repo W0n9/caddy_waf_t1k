@@ -202,7 +202,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 	if err != nil {
 		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
-		recordConnectionError(engine.addr, classifyConnectionError(err))
+		recordConnectionError(engine.addr, m.instanceID, classifyConnectionError(err))
 		if isEngineError(err) {
 			m.logger.Error("DetectHttpRequest engine error",
 				zap.String("engine", engine.addr),
