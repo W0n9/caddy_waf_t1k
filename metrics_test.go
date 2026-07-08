@@ -82,22 +82,22 @@ func TestWAFMetricsRegistration(t *testing.T) {
 	expected := strings.NewReader(`
 		# HELP caddy_waf_connection_errors_total Total number of WAF detection connection errors by reason.
 		# TYPE caddy_waf_connection_errors_total counter
-		caddy_waf_connection_errors_total{engine="127.0.0.1:8000",instance="1",reason="connection_refused"} 1
+		caddy_waf_connection_errors_total{engine="127.0.0.1:8000",reason="connection_refused",waf_instance="1"} 1
 		# HELP caddy_waf_engines_healthy Health status of WAF engines.
 		# TYPE caddy_waf_engines_healthy gauge
-		caddy_waf_engines_healthy{engine="127.0.0.1:8000",instance="1"} 1
+		caddy_waf_engines_healthy{engine="127.0.0.1:8000",waf_instance="1"} 1
 		# HELP caddy_waf_pool_active_conns Number of active connections in the WAF engine pool.
 		# TYPE caddy_waf_pool_active_conns gauge
-		caddy_waf_pool_active_conns{engine="127.0.0.1:8000",instance="1"} 4
+		caddy_waf_pool_active_conns{engine="127.0.0.1:8000",waf_instance="1"} 4
 		# HELP caddy_waf_pool_idle_conns Number of idle connections in the WAF engine pool.
 		# TYPE caddy_waf_pool_idle_conns gauge
-		caddy_waf_pool_idle_conns{engine="127.0.0.1:8000",instance="1"} 2
+		caddy_waf_pool_idle_conns{engine="127.0.0.1:8000",waf_instance="1"} 2
 		# HELP caddy_waf_pool_max_conns Maximum number of connections allowed in the WAF engine pool.
 		# TYPE caddy_waf_pool_max_conns gauge
-		caddy_waf_pool_max_conns{engine="127.0.0.1:8000",instance="1"} 8
+		caddy_waf_pool_max_conns{engine="127.0.0.1:8000",waf_instance="1"} 8
 		# HELP caddy_waf_pool_waiting_requests Number of requests waiting for an available WAF engine connection.
 		# TYPE caddy_waf_pool_waiting_requests gauge
-		caddy_waf_pool_waiting_requests{engine="127.0.0.1:8000",instance="1"} 0
+		caddy_waf_pool_waiting_requests{engine="127.0.0.1:8000",waf_instance="1"} 0
 		# HELP caddy_waf_requests_total Total number of requests processed by the WAF.
 		# TYPE caddy_waf_requests_total counter
 		caddy_waf_requests_total{action="passed"} 1

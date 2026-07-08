@@ -60,49 +60,49 @@ func initWAFMetrics(registry *prometheus.Registry) {
 			Subsystem: sub,
 			Name:      "engines_healthy",
 			Help:      "Health status of WAF engines.",
-		}, []string{"engine", "instance"})
+		}, []string{"engine", "waf_instance"})
 
 		wafMetrics.poolIdleConns = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "pool_idle_conns",
 			Help:      "Number of idle connections in the WAF engine pool.",
-		}, []string{"engine", "instance"})
+		}, []string{"engine", "waf_instance"})
 
 		wafMetrics.poolActiveConns = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "pool_active_conns",
 			Help:      "Number of active connections in the WAF engine pool.",
-		}, []string{"engine", "instance"})
+		}, []string{"engine", "waf_instance"})
 
 		wafMetrics.poolMaxConns = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "pool_max_conns",
 			Help:      "Maximum number of connections allowed in the WAF engine pool.",
-		}, []string{"engine", "instance"})
+		}, []string{"engine", "waf_instance"})
 
 		wafMetrics.poolWaitingReqs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "pool_waiting_requests",
 			Help:      "Number of requests waiting for an available WAF engine connection.",
-		}, []string{"engine", "instance"})
+		}, []string{"engine", "waf_instance"})
 
 		wafMetrics.connectionErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "connection_errors_total",
 			Help:      "Total number of WAF detection connection errors by reason.",
-		}, []string{"engine", "reason", "instance"})
+		}, []string{"engine", "reason", "waf_instance"})
 
 		wafMetrics.poolEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Subsystem: sub,
 			Name:      "pool_events_total",
 			Help:      "Total number of WAF engine pool lifecycle events by reason.",
-		}, []string{"engine", "reason", "instance"})
+		}, []string{"engine", "reason", "waf_instance"})
 	})
 
 	logger := caddy.Log().Named("waf.metrics")
@@ -192,7 +192,7 @@ func (u *metricsPoolUpdater) update() {
 		if engine.Available() {
 			healthy = 1.0
 		}
-		labels := prometheus.Labels{"engine": engine.addr, "instance": u.instanceID}
+		labels := prometheus.Labels{"engine": engine.addr, "waf_instance": u.instanceID}
 		wafMetrics.enginesHealthy.With(labels).Set(healthy)
 
 		stats := engine.poolStats()
@@ -228,7 +228,7 @@ func (u *metricsPoolUpdater) syncPoolEvents(addr string, stats t1k.PoolStats) {
 		wafMetrics.poolEvents.With(prometheus.Labels{
 			"engine":   addr,
 			"reason":   reason,
-			"instance": u.instanceID,
+			"waf_instance": u.instanceID,
 		}).Add(delta)
 		state.last[i] = current[i]
 	}
@@ -238,6 +238,6 @@ func recordConnectionError(engine, instance, reason string) {
 	wafMetrics.connectionErrors.With(prometheus.Labels{
 		"engine":   engine,
 		"reason":   reason,
-		"instance": instance,
+		"waf_instance": instance,
 	}).Inc()
 }

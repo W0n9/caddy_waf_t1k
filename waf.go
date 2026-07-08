@@ -233,6 +233,11 @@ func (m *CaddyWAF) Cleanup() error {
 	for _, engine := range m.Engines {
 		if engine != nil {
 			engine.pool.Release()
+			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolMaxConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr, m.instanceID)
 		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
