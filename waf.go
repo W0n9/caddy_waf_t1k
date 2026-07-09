@@ -245,12 +245,13 @@ func (m *CaddyWAF) Cleanup() error {
 }
 
 var clientErrorPatterns = []string{
-	"read request body", // Body() 客户端读体错误（unexpected EOF / H2 stream CANCEL / H3 QUIC blackhole 等）
+	// Body() 客户端读体错误（unexpected EOF / H2 CANCEL / H3 QUIC / connection reset 等）。
+	// 引擎侧 TCP reset 不含此前缀，应计为引擎错误并进入被动健康检查。
+	"read request body",
 	"H3_REQUEST_CANCELLED",
 	"H3 error",
 	"client disconnected",
 	"keepalive limit reached",
-	"connection reset by peer",
 	"timeout: no recent network activity",
 	"empty hex number for chunk length",
 	"context canceled",
