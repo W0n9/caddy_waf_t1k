@@ -65,7 +65,7 @@ type CaddyWAF struct {
 	logger *zap.Logger
 	ctx    caddy.Context
 
-	instanceID string // stable per-instance id for prometheus instance label
+	instanceID string // app-lifetime-unique id for the prometheus waf_instance label
 
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
