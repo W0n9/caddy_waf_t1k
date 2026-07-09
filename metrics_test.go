@@ -24,6 +24,8 @@ func TestClassifyConnectionError(t *testing.T) {
 		{"client error", errors.New("context canceled"), reasonClientError},
 		{"other engine error", errors.New("something unexpected"), reasonOther},
 		{"nil error", nil, reasonOther},
+		{"client body connection reset", errors.New("read request body: read tcp 1.2.3.4:443->5.6.7.8:12345: read: connection reset by peer"), reasonClientError},
+		{"engine-side connection reset", errors.New("read tcp 222.199.255.27:56702->10.2.137.29:8000: read: connection reset by peer"), reasonOther},
 	}
 
 	for _, tt := range tests {
