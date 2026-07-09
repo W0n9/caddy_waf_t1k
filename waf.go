@@ -3,6 +3,7 @@ package caddy_waf_t1k
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,11 @@ import (
 func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
+
+// instanceSeq assigns a stable, app-lifetime-unique id to each CaddyWAF
+// instance so metrics can distinguish per-instance pools when the same
+// waf_chaitin directive is provisioned many times.
+var instanceSeq int64
 
 // Engine wraps a t1k.ChannelPool with per-engine health state.
 type Engine struct {
@@ -59,6 +65,8 @@ type CaddyWAF struct {
 	logger *zap.Logger
 	ctx    caddy.Context
 
+	instanceID string // app-lifetime-unique id for the prometheus waf_instance label
+
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
 	// Multiple WAF engine pools
@@ -97,6 +105,7 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 	m.ctx = ctx
+	m.instanceID = strconv.FormatInt(atomic.AddInt64(&instanceSeq, 1), 10)
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if len(m.WafEngineAddrs) == 0 {
@@ -193,7 +202,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 	if err != nil {
 		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
-		recordConnectionError(engine.addr, classifyConnectionError(err))
+		recordConnectionError(engine.addr, m.instanceID, classifyConnectionError(err))
 		if isEngineError(err) {
 			m.logger.Error("DetectHttpRequest engine error",
 				zap.String("engine", engine.addr),
@@ -224,6 +233,11 @@ func (m *CaddyWAF) Cleanup() error {
 	for _, engine := range m.Engines {
 		if engine != nil {
 			engine.pool.Release()
+			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolMaxConns.DeleteLabelValues(engine.addr, m.instanceID)
+			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr, m.instanceID)
 		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")
