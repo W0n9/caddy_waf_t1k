@@ -1,6 +1,7 @@
 package caddy_waf_t1k
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -59,6 +60,46 @@ func (e *Engine) poolStats() t1k.PoolStats {
 
 type EnginePool []*Engine
 
+// engineUsagePool holds t1k connection pools shared across every waf_chaitin
+// handler that resolves to the same engineKey. Reference-counted: the pool is
+// built once, reused by all matching handlers, and released only when the last
+// handler is cleaned up.
+var engineUsagePool = caddy.NewUsagePool()
+
+// engineKey identifies a shareable engine. It must stay comparable (value
+// fields only). Every parameter that changes pool behaviour or health state
+// is included so that only identically-configured sites share a pool.
+type engineKey struct {
+	addr        string
+	initialCap  int
+	maxIdle     int
+	maxCap      int
+	idleTimeout time.Duration
+	maxFails    int            // health threshold; different → separate state machine
+	failDur     caddy.Duration // countFailure decay window; keeps m.countFailure consistent across sharers
+}
+
+// sharedEngine is the value stored in engineUsagePool. It owns the engine, the
+// single metrics updater for that engine, and the cancel func stopping it.
+type sharedEngine struct {
+	engine  *Engine
+	cancel  context.CancelFunc
+	updater *metricsPoolUpdater
+}
+
+// Destruct is called by UsagePool.Delete when the last reference is released.
+func (s *sharedEngine) Destruct() error {
+	s.cancel()              // stop the metrics updater first
+	s.engine.pool.Release() // then close all TCP connections
+	addr := s.engine.addr
+	wafMetrics.enginesHealthy.DeleteLabelValues(addr)
+	wafMetrics.poolIdleConns.DeleteLabelValues(addr)
+	wafMetrics.poolActiveConns.DeleteLabelValues(addr)
+	wafMetrics.poolMaxConns.DeleteLabelValues(addr)
+	wafMetrics.poolWaitingReqs.DeleteLabelValues(addr)
+	return nil
+}
+
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
 	logger *zap.Logger
@@ -68,6 +109,8 @@ type CaddyWAF struct {
 
 	// Multiple WAF engine pools
 	Engines EnginePool
+	// engineKeys aligns 1:1 with Engines; used by Cleanup to release refs.
+	engineKeys []engineKey
 
 	// Load balancing distributes load/requests between backends.
 	LoadBalancing *LoadBalancing `json:"load_balancing,omitempty"`
@@ -148,31 +191,55 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		m.HealthMaxFails = 1
 	}
 
-	// Initialize multiple engines
-	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
-	for i, addr := range m.WafEngineAddrs {
-		pc := &t1k.PoolConfig{
-			InitialCap:  m.InitialCap,
-			MaxIdle:     m.MaxIdle,
-			MaxCap:      m.MaxCap,
-			Factory:     &t1k.TcpFactory{Addr: addr},
-			IdleTimeout: m.IdleTimeout,
-		}
-
-		engine, err := initDetect(pc)
-		if err != nil {
-			return fmt.Errorf("init detect error for %s: %v", addr, err)
-		}
-		m.Engines[i] = &Engine{
-			pool:     engine,
-			addr:     addr,
-			maxFails: m.HealthMaxFails,
-		}
-	}
-	m.logger.Info("WAF plugin instance Provisioned")
-
+	// Register metrics before constructing shared engines: the updater created
+	// inside the constructor references the package-level wafMetrics collectors.
 	initWAFMetrics(ctx.GetMetricsRegistry())
-	newMetricsPoolUpdater(m.Engines, m.ctx).start()
+
+	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
+	m.engineKeys = make([]engineKey, len(m.WafEngineAddrs))
+	for i, addr := range m.WafEngineAddrs {
+		key := engineKey{
+			addr:        addr,
+			initialCap:  m.InitialCap,
+			maxIdle:     m.MaxIdle,
+			maxCap:      m.MaxCap,
+			idleTimeout: m.IdleTimeout,
+			maxFails:    m.HealthMaxFails,
+			failDur:     m.HealthFailDuration,
+		}
+
+		val, _, err := engineUsagePool.LoadOrNew(key, func() (caddy.Destructor, error) {
+			pc := &t1k.PoolConfig{
+				InitialCap:  key.initialCap,
+				MaxIdle:     key.maxIdle,
+				MaxCap:      key.maxCap,
+				Factory:     &t1k.TcpFactory{Addr: key.addr},
+				IdleTimeout: key.idleTimeout,
+			}
+			pool, err := initDetect(pc)
+			if err != nil {
+				return nil, fmt.Errorf("init detect error for %s: %v", key.addr, err)
+			}
+			engine := &Engine{pool: pool, addr: key.addr, maxFails: key.maxFails}
+			uctx, cancel := context.WithCancel(context.Background())
+			updater := newMetricsPoolUpdater(EnginePool{engine}, uctx)
+			updater.start()
+			return &sharedEngine{engine: engine, cancel: cancel, updater: updater}, nil
+		})
+		if err != nil {
+			// roll back refs already acquired to avoid leaking shared engines
+			for j := 0; j < i; j++ {
+				engineUsagePool.Delete(m.engineKeys[j])
+			}
+			return fmt.Errorf("provision engine %s: %w", addr, err)
+		}
+
+		se := val.(*sharedEngine)
+		m.Engines[i] = se.engine
+		m.engineKeys[i] = key
+	}
+
+	m.logger.Info("WAF plugin instance Provisioned")
 
 	return nil
 }
@@ -271,14 +338,11 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 
 // Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
 func (m *CaddyWAF) Cleanup() error {
-	for _, engine := range m.Engines {
-		if engine != nil {
-			engine.pool.Release()
-			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr)
-			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr)
-			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr)
-			wafMetrics.poolMaxConns.DeleteLabelValues(engine.addr)
-			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr)
+	for _, key := range m.engineKeys {
+		if _, err := engineUsagePool.Delete(key); err != nil {
+			m.logger.Warn("error releasing shared WAF engine",
+				zap.String("engine", key.addr),
+				zap.Error(err))
 		}
 	}
 	m.logger.Info("Cleaning up WAF plugin instance")

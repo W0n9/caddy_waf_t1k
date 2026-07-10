@@ -458,3 +458,22 @@ func TestServeHTTPRetrySkipsTriedEngine(t *testing.T) {
 		t.Fatalf("e2 calls = %d, want 1", e2Calls.Load())
 	}
 }
+
+func TestEngineKeyComparable(t *testing.T) {
+	k1 := engineKey{addr: "10.0.0.1:8000", initialCap: 1, maxIdle: 16, maxCap: 32, idleTimeout: 30 * time.Second, maxFails: 3, failDur: caddy.Duration(3 * time.Second)}
+	k2 := engineKey{addr: "10.0.0.1:8000", initialCap: 1, maxIdle: 16, maxCap: 32, idleTimeout: 30 * time.Second, maxFails: 3, failDur: caddy.Duration(3 * time.Second)}
+	k3 := k1
+	k3.maxCap = 64 // 池配置不同 → 必须是不同的 key
+
+	m := map[engineKey]int{}
+	m[k1]++
+	m[k2]++ // 与 k1 完全相同,应落到同一槽
+	m[k3]++
+
+	if m[k1] != 2 {
+		t.Fatalf("identical keys should collapse: got %d, want 2", m[k1])
+	}
+	if len(m) != 2 {
+		t.Fatalf("differing maxCap should split: got %d distinct keys, want 2", len(m))
+	}
+}
