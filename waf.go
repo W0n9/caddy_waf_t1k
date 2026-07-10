@@ -88,9 +88,12 @@ type sharedEngine struct {
 }
 
 // Destruct is called by UsagePool.Delete when the last reference is released.
+// cancel() only signals the updater goroutine; it does not join it, so a final
+// tick may still race Release(). That race is safe because t1k ChannelPool
+// guards Stats() (RLock + conns != nil) against Release() (Lock, conns = nil).
 func (s *sharedEngine) Destruct() error {
-	s.cancel()              // stop the metrics updater first
-	s.engine.pool.Release() // then close all TCP connections
+	s.cancel()
+	s.engine.pool.Release()
 	addr := s.engine.addr
 	wafMetrics.enginesHealthy.DeleteLabelValues(addr)
 	wafMetrics.poolIdleConns.DeleteLabelValues(addr)

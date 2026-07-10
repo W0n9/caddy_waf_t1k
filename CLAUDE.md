@@ -91,6 +91,8 @@ Scrape via Caddy `metrics` handler or Admin API `/metrics`. See README for examp
 **Engine pool:**  
 Pools are keyed by `engineKey`: the combination of address, pool settings (`initial_cap`, `max_idle`, `max_cap`, `idle_timeout`), and health settings (`health_max_fails`, `health_fail_duration`). Multiple `waf_chaitin` instances with the same `engineKey` share a single `t1k.ChannelPool` and health state. Instances with different `engineKey` values get separate pools.
 
+Known limitation: pool/health metrics are labeled by `engine` (address) only, so two instances that share an address but differ in pool/health config resolve to separate pools yet write the same `{engine=addr}` series — they overwrite each other's gauges and one instance's `Cleanup` deletes the other's series. This does not occur in the normal case where every `import waf` uses identical config. If you need distinct pool configs for the same engine address, expect metric aliasing on that address.
+
 ## Important: Module Replace Directive
 
 `go.mod` replaces the upstream `github.com/chaitin/t1k-go` with the local checkout at `./src/t1k-go` for development. For release builds, use `--replace github.com/chaitin/t1k-go=github.com/w0n9/t1k-go@latest` (or a pinned tag). Forgetting this flag causes a build failure.
