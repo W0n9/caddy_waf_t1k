@@ -253,6 +253,20 @@ func TestRoundRobinEmptyPool(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativeRetries(t *testing.T) {
+	m := &CaddyWAF{LoadBalancing: &LoadBalancing{Retries: -1}}
+	if err := m.Validate(); err == nil {
+		t.Fatal("expected error for negative retries")
+	}
+}
+
+func TestValidateAllowsZeroRetries(t *testing.T) {
+	m := &CaddyWAF{LoadBalancing: &LoadBalancing{Retries: 0}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestExcludeEngines(t *testing.T) {
 	e1 := &Engine{addr: "192.0.2.1:8000"}
 	e2 := &Engine{addr: "192.0.2.2:8000"}

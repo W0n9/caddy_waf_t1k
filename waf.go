@@ -186,6 +186,14 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	return nil
 }
 
+// Validate ensures module configuration is valid.
+func (m *CaddyWAF) Validate() error {
+	if m.LoadBalancing != nil && m.LoadBalancing.Retries < 0 {
+		return fmt.Errorf("load_balancing.retries must be >= 0")
+	}
+	return nil
+}
+
 // ServeHTTP processes incoming HTTP requests by utilizing the Caddy WAF engine to detect
 // potential threats. If a request is identified as malicious, it redirects the request to
 // an intercept handler. Otherwise, it passes the request to the next handler in the chain.
@@ -326,6 +334,7 @@ func (m *CaddyWAF) countFailure(engine *Engine) {
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*CaddyWAF)(nil)
+	_ caddy.Validator             = (*CaddyWAF)(nil)
 	_ caddy.CleanerUpper          = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
