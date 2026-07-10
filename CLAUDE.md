@@ -60,7 +60,7 @@ Four core source files plus metrics/error helpers:
 `ServeHTTP` → pick engine via `LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)` (skips unhealthy engines) → if all engines unavailable, fail-open → `engine.DetectHttpRequest(r)` → if error, classify via `isEngineError()`: engine errors trigger `countFailure()` (logged as error), client errors are logged as warn; both fail-open → if `result.Blocked()` call `redirectIntercept`, else call `next.ServeHTTP`.
 
 **Error classification:**  
-`isEngineError()` distinguishes client-side errors (H3_REQUEST_CANCELLED, client disconnected, keepalive limit, connection reset by peer, etc.) from engine-side errors (connection refused, dial timeout, broken pipe). Only engine errors count toward health check failures.
+`isEngineError()` distinguishes client-side errors (H3_REQUEST_CANCELLED, client disconnected, keepalive limit, `read request body` prefix from t1k-go Body reads, etc.) from engine-side errors (connection refused, dial timeout, broken pipe, engine TCP connection reset). Client body-read failures are tagged with `read request body` so they are not confused with engine-side `unexpected EOF` / reset. Only engine errors count toward health check failures.
 
 **Passive health check (Caddy-style):**  
 On engine error, `countFailure()` atomically increments the engine's fail counter and spawns a goroutine that decrements it after `health_fail_duration`. When `fails >= health_max_fails`, the engine is marked unavailable and skipped by selection policies. Setting `health_fail_duration` to 0 (default) disables health checking entirely.
