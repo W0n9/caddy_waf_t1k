@@ -246,3 +246,38 @@ func TestRoundRobinEmptyPool(t *testing.T) {
 		t.Error("expected nil for empty pool")
 	}
 }
+
+func TestExcludeEngines(t *testing.T) {
+	e1 := &Engine{addr: "192.0.2.1:8000"}
+	e2 := &Engine{addr: "192.0.2.2:8000"}
+	e3 := &Engine{addr: "192.0.2.3:8000"}
+	pool := EnginePool{e1, e2, e3}
+
+	t.Run("empty tried returns same pool contents", func(t *testing.T) {
+		got := excludeEngines(pool, nil)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3", len(got))
+		}
+	})
+
+	t.Run("excludes tried engines", func(t *testing.T) {
+		tried := map[*Engine]struct{}{e1: {}}
+		got := excludeEngines(pool, tried)
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		for _, e := range got {
+			if e == e1 {
+				t.Fatal("excluded engine still present")
+			}
+		}
+	})
+
+	t.Run("all tried returns empty", func(t *testing.T) {
+		tried := map[*Engine]struct{}{e1: {}, e2: {}, e3: {}}
+		got := excludeEngines(pool, tried)
+		if len(got) != 0 {
+			t.Fatalf("len = %d, want 0", len(got))
+		}
+	})
+}

@@ -29,6 +29,22 @@ type Selector interface {
 	Select(EnginePool, *http.Request, http.ResponseWriter) *Engine
 }
 
+// excludeEngines returns a new pool without engines present in tried.
+// If tried is empty, pool is returned as-is.
+func excludeEngines(pool EnginePool, tried map[*Engine]struct{}) EnginePool {
+	if len(tried) == 0 {
+		return pool
+	}
+	out := make(EnginePool, 0, len(pool))
+	for _, e := range pool {
+		if _, ok := tried[e]; ok {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // RandomSelection is a policy that selects
 // an available host at random.
 type RandomSelection struct{}
