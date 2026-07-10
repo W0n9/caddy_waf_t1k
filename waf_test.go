@@ -310,7 +310,6 @@ func ensureWAFMetrics(t *testing.T) {
 func newTestWAF(engines EnginePool, retries int) *CaddyWAF {
 	return &CaddyWAF{
 		logger:     zap.NewNop(),
-		instanceID: "test",
 		Engines:    engines,
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &RoundRobinSelection{robin: ^uint32(0)},
