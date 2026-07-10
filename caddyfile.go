@@ -116,6 +116,21 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid health_max_fails value: %v", err)
 			}
 			m.HealthMaxFails = maxFails
+		case "lb_retries":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			retries, err := strconv.Atoi(d.Val())
+			if err != nil {
+				return d.Errf("invalid lb_retries value: %v", err)
+			}
+			if retries < 0 {
+				return d.Errf("lb_retries must be >= 0")
+			}
+			if m.LoadBalancing == nil {
+				m.LoadBalancing = new(LoadBalancing)
+			}
+			m.LoadBalancing.Retries = retries
 		default:
 			return d.Errf("unrecognized subdirective %s", d.Val())
 		}

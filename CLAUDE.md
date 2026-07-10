@@ -57,7 +57,7 @@ Four core source files plus metrics/error helpers:
 | `errors.go` | `classifyConnectionError` — maps Detect errors to Prometheus `reason` labels |
 
 **Request flow:**  
-`ServeHTTP` → pick engine via `LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)` (skips unhealthy engines) → if all engines unavailable, fail-open → `engine.DetectHttpRequest(r)` → if error, classify via `isEngineError()`: engine errors trigger `countFailure()` (logged as error), client errors are logged as warn; both fail-open → if `result.Blocked()` call `redirectIntercept`, else call `next.ServeHTTP`.
+`ServeHTTP` → loop up to 1+lb_retries: Select from engines excluding already-tried (skips unhealthy) → `DetectHttpRequest` → on success block/pass → on client error fail-open → on engine error `countFailure` and retry if attempts remain and untried engines exist → else fail-open. If Select returns nil with no prior tries → failopen; if nil after tries → error.
 
 **Error classification:**  
 `isEngineError()` distinguishes client-side errors (H3_REQUEST_CANCELLED, client disconnected, keepalive limit, `read request body` prefix from t1k-go Body reads, etc.) from engine-side errors (connection refused, dial timeout, broken pipe, engine TCP connection reset). Client body-read failures are tagged with `read request body` so they are not confused with engine-side `unexpected EOF` / reset. Only engine errors count toward health check failures.
@@ -105,6 +105,7 @@ waf_chaitin {
     max_cap 32         # max total connections per pool
     idle_timeout 30s   # duration string (e.g. 30s, 1m) — NOT bare integer
     lb_policy round_robin  # optional; default is random
+    lb_retries 1              # optional; additional Detect attempts after engine error (default: 0)
     health_fail_duration 30s  # passive health check window; 0 = disabled (default)
     health_max_fails 3        # failure threshold to mark engine unhealthy (default: 1)
 }

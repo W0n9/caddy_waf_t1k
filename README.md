@@ -14,6 +14,7 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 			max_cap 32 # max connections
 			idle_timeout 30s # connections idle timeout
 			lb_policy round_robin # load balancing policy (random or round_robin, default: random)
+			lb_retries 1 # additional engines to try after Detect engine error (default: 0)
 			health_fail_duration 30s # passive health check window (default: 0 = disabled)
 			health_max_fails 3 # failure threshold to mark engine unhealthy (default: 1)
 		}
@@ -26,6 +27,12 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 }
 
 ```
+
+# Load balancing retries
+
+By default (`lb_retries 0`), a Detect engine error fail-opens immediately (same as before).
+Set `lb_retries` to try other engines on the same request (engine errors only; client errors are never retried).
+To approximate nginx `t1k_next_upstream` with N engines, use `lb_retries N-1`.
 
 # How to build
 

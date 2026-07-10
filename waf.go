@@ -33,9 +33,14 @@ type Engine struct {
 	addr     string
 	fails    int64 // atomic: unexpired failure count
 	maxFails int
+	// detectFn, if set, replaces pool.DetectHttpRequest (tests only).
+	detectFn func(*http.Request) (*detection.Result, error)
 }
 
 func (e *Engine) DetectHttpRequest(r *http.Request) (*detection.Result, error) {
+	if e.detectFn != nil {
+		return e.detectFn(r)
+	}
 	return e.pool.DetectHttpRequest(r)
 }
 
@@ -181,50 +186,95 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	return nil
 }
 
+// Validate ensures module configuration is valid.
+func (m *CaddyWAF) Validate() error {
+	if m.LoadBalancing != nil && m.LoadBalancing.Retries < 0 {
+		return fmt.Errorf("load_balancing.retries must be >= 0")
+	}
+	return nil
+}
+
 // ServeHTTP processes incoming HTTP requests by utilizing the Caddy WAF engine to detect
 // potential threats. If a request is identified as malicious, it redirects the request to
 // an intercept handler. Otherwise, it passes the request to the next handler in the chain.
 // The method handles detection errors and enforces a timeout for the detection process,
 // logging relevant information in each case.
 func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	engine := m.LoadBalancing.SelectionPolicy.Select(m.Engines, r, w)
-	if engine == nil {
-		m.logger.Warn("all WAF engines unavailable, request passed through",
-			zap.String("path", r.URL.Path),
-			zap.String("method", r.Method))
-		wafMetrics.requestsTotal.WithLabelValues("failopen").Inc()
-		return next.ServeHTTP(w, r)
+	retries := 0
+	if m.LoadBalancing != nil {
+		retries = m.LoadBalancing.Retries
 	}
+	maxAttempts := 1 + retries
+	tried := make(map[*Engine]struct{})
 
-	start := time.Now()
-	result, err := engine.DetectHttpRequest(r)
-	wafMetrics.detectDuration.WithLabelValues(engine.addr).Observe(time.Since(start).Seconds())
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		candidates := excludeEngines(m.Engines, tried)
+		engine := m.LoadBalancing.SelectionPolicy.Select(candidates, r, w)
+		if engine == nil {
+			if len(tried) == 0 {
+				m.logger.Warn("all WAF engines unavailable, request passed through",
+					zap.String("path", r.URL.Path),
+					zap.String("method", r.Method))
+				wafMetrics.requestsTotal.WithLabelValues("failopen").Inc()
+			} else {
+				m.logger.Error("no remaining WAF engines after detect failures, request passed through",
+					zap.String("path", r.URL.Path),
+					zap.String("method", r.Method),
+					zap.Int("tried", len(tried)))
+				wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+			}
+			return next.ServeHTTP(w, r)
+		}
 
-	if err != nil {
-		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+		start := time.Now()
+		result, err := engine.DetectHttpRequest(r)
+		wafMetrics.detectDuration.WithLabelValues(engine.addr).Observe(time.Since(start).Seconds())
+
+		if err == nil {
+			if result.Blocked() {
+				wafMetrics.requestsTotal.WithLabelValues("blocked").Inc()
+				return m.redirectIntercept(w, result)
+			}
+			wafMetrics.requestsTotal.WithLabelValues("passed").Inc()
+			return next.ServeHTTP(w, r)
+		}
+
 		recordConnectionError(engine.addr, m.instanceID, classifyConnectionError(err))
-		if isEngineError(err) {
-			m.logger.Error("DetectHttpRequest engine error",
-				zap.String("engine", engine.addr),
-				zap.String("request", r.Host),
-				zap.String("path", r.URL.Path),
-				zap.String("method", r.Method),
-				zap.Error(err))
-			m.countFailure(engine)
-		} else {
+
+		if !isEngineError(err) {
 			m.logger.Warn("DetectHttpRequest client error",
 				zap.String("request", r.Host),
 				zap.String("path", r.URL.Path),
 				zap.String("method", r.Method),
 				zap.Error(err))
+			wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+			return next.ServeHTTP(w, r)
 		}
+
+		m.logger.Error("DetectHttpRequest engine error",
+			zap.String("engine", engine.addr),
+			zap.String("request", r.Host),
+			zap.String("path", r.URL.Path),
+			zap.String("method", r.Method),
+			zap.Int("attempt", attempt+1),
+			zap.Int("max_attempts", maxAttempts),
+			zap.Error(err))
+		m.countFailure(engine)
+		tried[engine] = struct{}{}
+
+		// More attempts allowed and at least one untried engine may remain.
+		if attempt+1 < maxAttempts && len(excludeEngines(m.Engines, tried)) > 0 {
+			m.logger.Warn("retrying detect on another WAF engine",
+				zap.String("failed_engine", engine.addr),
+				zap.Int("attempt", attempt+1))
+			continue
+		}
+
+		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
 		return next.ServeHTTP(w, r)
 	}
-	if result.Blocked() {
-		wafMetrics.requestsTotal.WithLabelValues("blocked").Inc()
-		return m.redirectIntercept(w, result)
-	}
-	wafMetrics.requestsTotal.WithLabelValues("passed").Inc()
+
+	wafMetrics.requestsTotal.WithLabelValues("error").Inc()
 	return next.ServeHTTP(w, r)
 }
 
@@ -284,6 +334,7 @@ func (m *CaddyWAF) countFailure(engine *Engine) {
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*CaddyWAF)(nil)
+	_ caddy.Validator             = (*CaddyWAF)(nil)
 	_ caddy.CleanerUpper          = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)

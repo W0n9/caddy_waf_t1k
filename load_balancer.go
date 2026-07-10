@@ -21,12 +21,32 @@ type LoadBalancing struct {
 	// The default policy is random selection.
 	SelectionPolicyRaw json.RawMessage `json:"selection_policy,omitempty" caddy:"namespace=http.waf_chaitin.selection_policies inline_key=policy"`
 
+	// Retries is how many additional engines to try after the first
+	// Detect failure (engine errors only). Default 0 disables retry.
+	Retries int `json:"retries,omitempty"`
+
 	SelectionPolicy Selector `json:"-"`
 }
 
 // Selector selects an available upstream from the pool.
 type Selector interface {
 	Select(EnginePool, *http.Request, http.ResponseWriter) *Engine
+}
+
+// excludeEngines returns a new pool without engines present in tried.
+// If tried is empty, pool is returned as-is.
+func excludeEngines(pool EnginePool, tried map[*Engine]struct{}) EnginePool {
+	if len(tried) == 0 {
+		return pool
+	}
+	out := make(EnginePool, 0, len(pool))
+	for _, e := range pool {
+		if _, ok := tried[e]; ok {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // RandomSelection is a policy that selects
