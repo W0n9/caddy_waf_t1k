@@ -2,11 +2,17 @@ package caddy_waf_t1k
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/chaitin/t1k-go/detection"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 func TestIsEngineError(t *testing.T) {
@@ -280,4 +286,162 @@ func TestExcludeEngines(t *testing.T) {
 			t.Fatalf("len = %d, want 0", len(got))
 		}
 	})
+}
+
+func ensureWAFMetrics(t *testing.T) {
+	t.Helper()
+	initWAFMetrics(prometheus.NewRegistry())
+}
+
+func newTestWAF(engines EnginePool, retries int) *CaddyWAF {
+	return &CaddyWAF{
+		logger:     zap.NewNop(),
+		instanceID: "test",
+		Engines:    engines,
+		LoadBalancing: &LoadBalancing{
+			SelectionPolicy: &RoundRobinSelection{robin: ^uint32(0)},
+			Retries:         retries,
+		},
+		HealthFailDuration: 0,
+	}
+}
+
+func TestServeHTTPNoRetryByDefault(t *testing.T) {
+	ensureWAFMetrics(t)
+	var calls atomic.Int32
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return nil, errors.New("connection refused")
+	}}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return &detection.Result{Head: '.'}, nil
+	}}
+
+	m := newTestWAF(EnginePool{e1, e2}, 0)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	nextCalled := false
+	err := m.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		nextCalled = true
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if !nextCalled {
+		t.Fatal("expected fail-open to call next")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Detect calls = %d, want 1 (no retry)", got)
+	}
+}
+
+func TestServeHTTPRetriesOnEngineError(t *testing.T) {
+	ensureWAFMetrics(t)
+	var calls atomic.Int32
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return nil, errors.New("connection refused")
+	}}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return &detection.Result{Head: '.'}, nil
+	}}
+
+	m := newTestWAF(EnginePool{e1, e2}, 1)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	nextCalled := false
+	err := m.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		nextCalled = true
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if !nextCalled {
+		t.Fatal("expected next after pass")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Detect calls = %d, want 2", got)
+	}
+}
+
+func TestServeHTTPNoRetryOnClientError(t *testing.T) {
+	ensureWAFMetrics(t)
+	var calls atomic.Int32
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return nil, errors.New("read request body: unexpected EOF")
+	}}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return &detection.Result{Head: '.'}, nil
+	}}
+
+	m := newTestWAF(EnginePool{e1, e2}, 1)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	_ = m.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	}))
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Detect calls = %d, want 1 (client error not retried)", got)
+	}
+}
+
+func TestServeHTTPRetryExhaustedFailOpen(t *testing.T) {
+	ensureWAFMetrics(t)
+	var calls atomic.Int32
+	fail := func(*http.Request) (*detection.Result, error) {
+		calls.Add(1)
+		return nil, errors.New("connection refused")
+	}
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: fail}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: fail}
+
+	m := newTestWAF(EnginePool{e1, e2}, 1)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	nextCalled := false
+	err := m.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		nextCalled = true
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if !nextCalled {
+		t.Fatal("expected fail-open")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("Detect calls = %d, want 2", got)
+	}
+}
+
+func TestServeHTTPRetrySkipsTriedEngine(t *testing.T) {
+	ensureWAFMetrics(t)
+	var e1Calls, e2Calls atomic.Int32
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		e1Calls.Add(1)
+		return nil, errors.New("connection refused")
+	}}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		e2Calls.Add(1)
+		return &detection.Result{Head: '.'}, nil
+	}}
+
+	m := newTestWAF(EnginePool{e1, e2}, 3)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	_ = m.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error {
+		return nil
+	}))
+	if e1Calls.Load() != 1 {
+		t.Fatalf("e1 calls = %d, want 1", e1Calls.Load())
+	}
+	if e2Calls.Load() != 1 {
+		t.Fatalf("e2 calls = %d, want 1", e2Calls.Load())
+	}
 }

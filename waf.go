@@ -33,9 +33,14 @@ type Engine struct {
 	addr     string
 	fails    int64 // atomic: unexpired failure count
 	maxFails int
+	// detectFn, if set, replaces pool.DetectHttpRequest (tests only).
+	detectFn func(*http.Request) (*detection.Result, error)
 }
 
 func (e *Engine) DetectHttpRequest(r *http.Request) (*detection.Result, error) {
+	if e.detectFn != nil {
+		return e.detectFn(r)
+	}
 	return e.pool.DetectHttpRequest(r)
 }
 
