@@ -21,6 +21,10 @@ type LoadBalancing struct {
 	// The default policy is random selection.
 	SelectionPolicyRaw json.RawMessage `json:"selection_policy,omitempty" caddy:"namespace=http.waf_chaitin.selection_policies inline_key=policy"`
 
+	// Retries is how many additional engines to try after the first
+	// Detect failure (engine errors only). Default 0 disables retry.
+	Retries int `json:"retries,omitempty"`
+
 	SelectionPolicy Selector `json:"-"`
 }
 
