@@ -1,9 +1,12 @@
 package caddy_waf_t1k
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chaitin/t1k-go/detection"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/zap"
 )
 
@@ -457,5 +461,240 @@ func TestServeHTTPRetrySkipsTriedEngine(t *testing.T) {
 	}
 	if e2Calls.Load() != 1 {
 		t.Fatalf("e2 calls = %d, want 1", e2Calls.Load())
+	}
+}
+
+func readAndRestoreBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body
+}
+
+func TestServeHTTPMaxBodySizePreservesDownstreamBody(t *testing.T) {
+	ensureWAFMetrics(t)
+
+	for _, tt := range []struct {
+		name          string
+		body          string
+		contentLength int64
+		wantDetect    string
+		wantOversize  bool
+	}{
+		{name: "smaller than cap", body: "abc", contentLength: 3, wantDetect: "abc"},
+		{name: "exactly cap", body: "abcd", contentLength: 4, wantDetect: "abcd"},
+		{name: "one byte over cap", body: "abcde", contentLength: 5, wantDetect: "abcd", wantOversize: true},
+		{name: "far larger than cap, known length", body: strings.Repeat("x", 1000), contentLength: 1000, wantDetect: "xxxx", wantOversize: true},
+		{name: "chunked over cap, unknown length", body: "abcdefgh", contentLength: -1, wantDetect: "abcd", wantOversize: true},
+		{name: "empty body", body: "", contentLength: 0, wantDetect: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var detected []byte
+			engine := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(r *http.Request) (*detection.Result, error) {
+				detected = readAndRestoreBody(t, r)
+				return &detection.Result{Head: '.'}, nil
+			}}
+			m := newTestWAF(EnginePool{engine}, 0)
+			m.MaxBodySize = 4
+
+			req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewBufferString(tt.body))
+			req.ContentLength = tt.contentLength
+			before := testutil.ToFloat64(wafMetrics.oversizeRequests)
+			var downstream []byte
+			err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+				downstream = readAndRestoreBody(t, r)
+				return nil
+			}))
+			if err != nil {
+				t.Fatalf("ServeHTTP: %v", err)
+			}
+			if got := string(detected); got != tt.wantDetect {
+				t.Errorf("detected body = %q, want %q", got, tt.wantDetect)
+			}
+			if got := string(downstream); got != tt.body {
+				t.Errorf("downstream body = %q, want %q", got, tt.body)
+			}
+			wantCount := before
+			if tt.wantOversize {
+				wantCount++
+			}
+			if got := testutil.ToFloat64(wafMetrics.oversizeRequests); got != wantCount {
+				t.Errorf("oversize request count = %v, want %v", got, wantCount)
+			}
+		})
+	}
+}
+
+func TestServeHTTPMaxBodySizeUsesOriginalRequestWhenBodyIsKnownSmall(t *testing.T) {
+	ensureWAFMetrics(t)
+	for _, tt := range []struct {
+		name string
+		cap  int64
+	}{
+		{name: "cap unset", cap: 0},
+		{name: "body below cap", cap: 64},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := "body remains unchanged"
+			var detectedRequest *http.Request
+			var detected []byte
+			engine := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(r *http.Request) (*detection.Result, error) {
+				detectedRequest = r
+				detected = readAndRestoreBody(t, r)
+				return &detection.Result{Head: '.'}, nil
+			}}
+			m := newTestWAF(EnginePool{engine}, 0)
+			m.MaxBodySize = tt.cap
+
+			req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewBufferString(body))
+			var downstream []byte
+			if err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+				downstream = readAndRestoreBody(t, r)
+				return nil
+			})); err != nil {
+				t.Fatalf("ServeHTTP: %v", err)
+			}
+			if detectedRequest != req {
+				t.Error("detection did not receive the original request")
+			}
+			if got := string(detected); got != body {
+				t.Errorf("detected body = %q, want %q", got, body)
+			}
+			if got := string(downstream); got != body {
+				t.Errorf("downstream body = %q, want %q", got, body)
+			}
+		})
+	}
+}
+
+func TestServeHTTPMaxBodySizeRetriesUseSameBody(t *testing.T) {
+	ensureWAFMetrics(t)
+	var detected [][]byte
+	capture := func(r *http.Request) (*detection.Result, error) {
+		detected = append(detected, readAndRestoreBody(t, r))
+		return nil, errors.New("connection refused")
+	}
+	e1 := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: capture}
+	e2 := &Engine{addr: "192.0.2.2:8000", maxFails: 0, detectFn: capture}
+	m := newTestWAF(EnginePool{e1, e2}, 1)
+	m.MaxBodySize = 4
+
+	body := "abcdefgh"
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewBufferString(body))
+	var downstream []byte
+	if err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+		downstream = readAndRestoreBody(t, r)
+		return nil
+	})); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if len(detected) != 2 {
+		t.Fatalf("detect calls = %d, want 2", len(detected))
+	}
+	for i, got := range detected {
+		if string(got) != "abcd" {
+			t.Errorf("detect attempt %d body = %q, want %q", i+1, got, "abcd")
+		}
+	}
+	if got := string(downstream); got != body {
+		t.Errorf("downstream body = %q, want %q", got, body)
+	}
+}
+
+type partialErrorBody struct {
+	body []byte
+	read bool
+}
+
+func (b *partialErrorBody) Read(p []byte) (int, error) {
+	if b.read {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b.read = true
+	return copy(p, b.body), io.ErrUnexpectedEOF
+}
+
+func (*partialErrorBody) Close() error { return nil }
+
+func TestServeHTTPMaxBodySizeReadErrorFailsOpenWithBufferedBody(t *testing.T) {
+	ensureWAFMetrics(t)
+	engineCalled := false
+	engine := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(*http.Request) (*detection.Result, error) {
+		engineCalled = true
+		return &detection.Result{Head: '.'}, nil
+	}}
+	m := newTestWAF(EnginePool{engine}, 0)
+	m.MaxBodySize = 4
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", nil)
+	req.Body = &partialErrorBody{body: []byte("abc")}
+	req.ContentLength = -1
+	before := testutil.ToFloat64(wafMetrics.requestsTotal.WithLabelValues("error"))
+
+	var downstream []byte
+	var downstreamErr error
+	if err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+		downstream, downstreamErr = io.ReadAll(r.Body)
+		return nil
+	})); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if engineCalled {
+		t.Fatal("detection ran after request body read error")
+	}
+	if got := string(downstream); got != "abc" {
+		t.Errorf("downstream body = %q, want %q", got, "abc")
+	}
+	if !errors.Is(downstreamErr, io.ErrUnexpectedEOF) {
+		t.Errorf("downstream read error = %v, want unexpected EOF", downstreamErr)
+	}
+	if got := testutil.ToFloat64(wafMetrics.requestsTotal.WithLabelValues("error")); got != before+1 {
+		t.Errorf("error request count = %v, want %v", got, before+1)
+	}
+}
+
+type closeTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestServeHTTPMaxBodySizePreservesOriginalBodyClose(t *testing.T) {
+	ensureWAFMetrics(t)
+	original := &closeTrackingBody{Reader: bytes.NewBufferString("abcdefgh")}
+	engine := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(r *http.Request) (*detection.Result, error) {
+		readAndRestoreBody(t, r)
+		return &detection.Result{Head: '.'}, nil
+	}}
+	m := newTestWAF(EnginePool{engine}, 0)
+	m.MaxBodySize = 4
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", nil)
+	req.Body = original
+	req.ContentLength = -1
+	if err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+		if _, err := io.ReadAll(r.Body); err != nil {
+			t.Fatalf("read downstream body: %v", err)
+		}
+		return r.Body.Close()
+	})); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if !original.closed {
+		t.Fatal("downstream Close did not close the original request body")
+	}
+}
+
+func TestValidateRejectsNegativeMaxBodySize(t *testing.T) {
+	m := &CaddyWAF{MaxBodySize: -1}
+	if err := m.Validate(); err == nil {
+		t.Fatal("expected error for negative max_body_size")
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"net"
 	"strconv"
 
+	"github.com/dustin/go-humanize"
+
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -77,6 +79,18 @@ func (m *CaddyWAF) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("invalid idle_timeout value: %v", err)
 			}
 			m.IdleTimeout = dur
+		case "max_body_size":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			size, err := humanize.ParseBytes(d.Val())
+			if err != nil {
+				return d.Errf("invalid max_body_size value: %v", err)
+			}
+			if size > uint64(maxBodySizeLimit) {
+				return d.Errf("max_body_size must be <= %d", maxBodySizeLimit)
+			}
+			m.MaxBodySize = int64(size)
 		case "lb_policy":
 			if !d.NextArg() {
 				return d.ArgErr()

@@ -1,7 +1,9 @@
 package caddy_waf_t1k
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +28,11 @@ func init() {
 // instance so metrics can distinguish per-instance pools when the same
 // waf_chaitin directive is provisioned many times.
 var instanceSeq int64
+
+// maxBodySizeLimit is the largest allowed MaxBodySize. It leaves headroom so
+// prepareDetectionRequest's io.LimitReader(body, m.MaxBodySize+1) cannot
+// overflow int64.
+const maxBodySizeLimit = 1<<63 - 2
 
 // Engine wraps a t1k.ChannelPool with per-engine health state.
 type Engine struct {
@@ -84,6 +91,10 @@ type CaddyWAF struct {
 	MaxIdle     int           `json:"max_idle,omitempty"`
 	MaxCap      int           `json:"max_cap,omitempty"`
 	IdleTimeout time.Duration `json:"idle_timeout,omitempty"`
+
+	// MaxBodySize 限制送给检测引擎的请求体字节数；完整请求体仍会转发给下游。
+	// 0 保持原有的无限制检测行为。
+	MaxBodySize int64 `json:"max_body_size,omitempty"`
 
 	HealthFailDuration caddy.Duration `json:"health_fail_duration,omitempty"`
 	HealthMaxFails     int            `json:"health_max_fails,omitempty"`
@@ -191,7 +202,50 @@ func (m *CaddyWAF) Validate() error {
 	if m.LoadBalancing != nil && m.LoadBalancing.Retries < 0 {
 		return fmt.Errorf("load_balancing.retries must be >= 0")
 	}
+	if m.MaxBodySize < 0 || m.MaxBodySize > maxBodySizeLimit {
+		return fmt.Errorf("max_body_size must be between 0 and %d", maxBodySizeLimit)
+	}
 	return nil
+}
+
+type recombinedBody struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (b *recombinedBody) Close() error {
+	return b.closer.Close()
+}
+
+func (m *CaddyWAF) prepareDetectionRequest(r *http.Request) (func() *http.Request, error) {
+	if m.MaxBodySize == 0 || r.Body == nil || (r.ContentLength >= 0 && r.ContentLength <= m.MaxBodySize) {
+		return func() *http.Request { return r }, nil
+	}
+
+	body := r.Body
+	buffered, err := io.ReadAll(io.LimitReader(body, m.MaxBodySize+1))
+	r.Body = &recombinedBody{
+		Reader: io.MultiReader(bytes.NewReader(buffered), body),
+		closer: body,
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	detectBody := buffered
+	if int64(len(detectBody)) > m.MaxBodySize {
+		detectBody = detectBody[:m.MaxBodySize]
+		wafMetrics.oversizeRequests.Inc()
+	}
+
+	return func() *http.Request {
+		detectRequest := new(http.Request)
+		*detectRequest = *r
+		detectRequest.Body = io.NopCloser(bytes.NewReader(detectBody))
+		detectRequest.ContentLength = int64(len(detectBody))
+		detectRequest.GetBody = nil
+		return detectRequest
+	}, nil
 }
 
 // ServeHTTP processes incoming HTTP requests by utilizing the Caddy WAF engine to detect
@@ -206,6 +260,17 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 	}
 	maxAttempts := 1 + retries
 	tried := make(map[*Engine]struct{})
+
+	newDetectionRequest, err := m.prepareDetectionRequest(r)
+	if err != nil {
+		m.logger.Warn("reading request body for detection",
+			zap.String("request", r.Host),
+			zap.String("path", r.URL.Path),
+			zap.String("method", r.Method),
+			zap.Error(err))
+		wafMetrics.requestsTotal.WithLabelValues("error").Inc()
+		return next.ServeHTTP(w, r)
+	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		candidates := excludeEngines(m.Engines, tried)
@@ -227,7 +292,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 		}
 
 		start := time.Now()
-		result, err := engine.DetectHttpRequest(r)
+		result, err := engine.DetectHttpRequest(newDetectionRequest())
 		wafMetrics.detectDuration.WithLabelValues(engine.addr).Observe(time.Since(start).Seconds())
 
 		if err == nil {

@@ -15,6 +15,7 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 			idle_timeout 30s # connections idle timeout
 			lb_policy round_robin # load balancing policy (random or round_robin, default: random)
 			lb_retries 1 # additional engines to try after Detect engine error (default: 0)
+			max_body_size 1MiB # inspect at most 1 MiB of each request body; 0 = unlimited (default)
 			health_fail_duration 30s # passive health check window (default: 0 = disabled)
 			health_max_fails 3 # failure threshold to mark engine unhealthy (default: 1)
 		}
@@ -27,6 +28,18 @@ This is a WAF plugin for [Caddy Server](https://github.com/caddyserver/caddy) us
 }
 
 ```
+
+# 请求体检测上限
+
+默认情况下，WAF 会为检测而缓冲完整请求体。使用 `max_body_size` 可限制发送给 WAF 引擎的请求体字节数：
+
+```caddyfile
+max_body_size 1MiB
+```
+
+只有前 N 个字节会送往检测；完整请求体仍会流式转发给下游处理器，因此此配置**不会**限制或截断上传。若需限制上传本身的大小，请使用 Caddy 原生的 `request_body { max_size ... }` 指令。
+
+默认值为 `0`，保持原有的无限制行为。大小可以使用字节数或 `go-humanize` 的 SI/IEC 后缀，例如 `1MB`、`1MiB`、`512KB`。
 
 # Load balancing retries
 
@@ -67,6 +80,7 @@ Or scrape the Admin API: `GET http://localhost:2019/metrics`
 |--------|--------|-------------|
 | `caddy_waf_requests_total` | `action` | blocked / passed / error / failopen |
 | `caddy_waf_detect_duration_seconds` | `engine` | WAF detection latency |
+| `caddy_waf_oversize_requests_total` | — | Requests whose body was truncated for detection |
 
 **Engine health & connection pool** (updated every 10s)
 
