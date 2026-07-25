@@ -1,3 +1,8 @@
 .vscode
+.worktrees/
 Caddyfile
+build/
 src/
+.omm/
+.mcp.json
+debug/
