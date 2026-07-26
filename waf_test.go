@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -697,4 +698,64 @@ func TestValidateRejectsNegativeMaxBodySize(t *testing.T) {
 	if err := m.Validate(); err == nil {
 		t.Fatal("expected error for negative max_body_size")
 	}
+}
+
+// TestServeHTTPMaxBodySizeMemoryBound is the only test that asserts on actual
+// memory usage rather than functional correctness. It streams a 256 MB body
+// through ServeHTTP and checks that TotalAlloc (monotonically increasing,
+// GC-timing-independent) grows by no more than ~cap + generous headroom,
+// not by the full body size.
+//
+// Without the body cap this test allocates ~256 MB and fails.
+func TestServeHTTPMaxBodySizeMemoryBound(t *testing.T) {
+	const bodySize = 256 << 20 // 256 MiB
+	const cap = 1 << 20        // 1 MiB
+
+	ensureWAFMetrics(t)
+	engine := &Engine{addr: "192.0.2.1:8000", maxFails: 0, detectFn: func(r *http.Request) (*detection.Result, error) {
+		// Drain detection body so the pool returns the connection cleanly.
+		_, _ = io.Copy(io.Discard, r.Body)
+		return &detection.Result{Head: '.'}, nil
+	}}
+	m := newTestWAF(EnginePool{engine}, 0)
+	m.MaxBodySize = cap
+
+	// Stream 256 MB from a zero reader; no buffering in the generator itself.
+	streamBody := io.LimitReader(zeroReader{}, bodySize)
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", streamBody)
+	req.ContentLength = bodySize
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	err := m.ServeHTTP(httptest.NewRecorder(), req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+		_, _ = io.Copy(io.Discard, r.Body)
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	deltaBytes := after.TotalAlloc - before.TotalAlloc
+
+	// Allow up to 32× cap overhead for runtime bookkeeping, slices, HTTP framing, etc.
+	// Even with generous headroom this is ~32 MiB — far below 256 MiB.
+	const maxAllowedBytes = cap * 32
+	if deltaBytes > maxAllowedBytes {
+		t.Errorf("TotalAlloc delta = %d MiB, want < %d MiB; body cap not effective",
+			deltaBytes>>20, maxAllowedBytes>>20)
+	}
+}
+
+// zeroReader is an infinite reader of zero bytes with zero allocation overhead.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
