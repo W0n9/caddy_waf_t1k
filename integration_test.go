@@ -3,6 +3,7 @@
 package caddy_waf_t1k
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,9 +125,15 @@ func TestIntegrationBodyCapDetectionBlindSpot(t *testing.T) {
 
 			rr := httptest.NewRecorder()
 			nextCalled := false
+			var downstreamBody []byte
 
-			err := waf.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) error {
+			err := waf.ServeHTTP(rr, req, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
 				nextCalled = true
+				b, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("reading downstream body: %v", readErr)
+				}
+				downstreamBody = b
 				return nil
 			}))
 			if err != nil {
@@ -141,6 +148,20 @@ func TestIntegrationBodyCapDetectionBlindSpot(t *testing.T) {
 				} else {
 					t.Errorf("%s: expected passed (next handler called), got HTTP %d (blocked)",
 						tc.desc, rr.Code)
+				}
+			}
+
+			if tc.wantBlocked {
+				if nextCalled {
+					t.Errorf("%s: expected request blocked, but next handler was called", tc.desc)
+				}
+			} else {
+				if !nextCalled {
+					t.Fatalf("%s: expected next handler to be called, it was not", tc.desc)
+				}
+				if string(downstreamBody) != tc.body {
+					t.Errorf("%s: downstream body mismatch: got %d bytes, want %d bytes (byte-for-byte upstream forwarding broken)",
+						tc.desc, len(downstreamBody), len(tc.body))
 				}
 			}
 		})
