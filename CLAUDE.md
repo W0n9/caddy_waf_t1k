@@ -57,7 +57,7 @@ Four core source files plus metrics/error helpers:
 | `errors.go` | `classifyConnectionError` — maps Detect errors to Prometheus `reason` labels |
 
 **Request flow:**  
-`ServeHTTP` → loop up to 1+lb_retries: Select from engines excluding already-tried (skips unhealthy) → `DetectHttpRequest` → on success block/pass → on client error fail-open → on engine error `countFailure` and retry if attempts remain and untried engines exist → else fail-open. If Select returns nil with no prior tries → failopen; if nil after tries → error.
+`ServeHTTP` → 当 `max_body_size > 0` 且 body 超限或长度未知时，预读前 N+1 字节、将完整已读段与原流重接给下游、为检测创建只含前 N 字节的独立请求；已知长度且不超限、或上限为 0 时保留原请求 → loop up to 1+lb_retries: Select from engines excluding already-tried (skips unhealthy) → `DetectHttpRequest` → on success block/pass → on client error fail-open → on engine error `countFailure` and retry if attempts remain and untried engines exist → else fail-open. If Select returns nil with no prior tries → failopen; if nil after tries → error.
 
 **Error classification:**  
 `isEngineError()` distinguishes client-side errors (H3_REQUEST_CANCELLED, client disconnected, keepalive limit, `read request body` prefix from t1k-go Body reads, etc.) from engine-side errors (connection refused, dial timeout, broken pipe, engine TCP connection reset). Client body-read failures are tagged with `read request body` so they are not confused with engine-side `unexpected EOF` / reset. Only engine errors count toward health check failures.
@@ -69,11 +69,12 @@ On engine error, `countFailure()` atomically increments the engine's fail counte
 Blocked requests set `Content-Type: application/json`, `X-Event-ID`, return HTTP 501, and write `{"message":"Intercept illegal requests","event_id":"..."}` JSON from `redirectIntercept`.
 
 **Prometheus metrics:**  
-Each `waf_chaitin` provision site is its own `CaddyWAF` instance (multiple `import waf` in a Caddyfile → multiple instances). The pool/health gauges and the two counters below carry a `waf_instance` label (a per-instance id assigned in `Provision`) so series from different instances don't overwrite each other. Use `sum by (engine)(...)` for totals and `max by (engine)(caddy_waf_engines_healthy)` for health; `Cleanup` deletes that instance's gauge series on reload. `requests_total` and `detect_duration_seconds` have no `waf_instance` (multi-instance accumulate/merge is already correct).
+Each `waf_chaitin` provision site is its own `CaddyWAF` instance (multiple `import waf` in a Caddyfile → multiple instances). The pool/health gauges and the two counters below carry a `waf_instance` label (a per-instance id assigned in `Provision`) so series from different instances don't overwrite each other. Use `sum by (engine)(...)` for totals and `max by (engine)(caddy_waf_engines_healthy)` for health; `Cleanup` deletes that instance's gauge series on reload. `requests_total`, `detect_duration_seconds`, and `oversize_requests_total` have no `waf_instance` (multi-instance accumulate/merge is already correct).
 
 Request / detection (no `waf_instance`):
 - `caddy_waf_requests_total{action}` — counter (blocked/passed/error/failopen)
 - `caddy_waf_detect_duration_seconds{engine}` — histogram
+- `caddy_waf_oversize_requests_total` — counter of requests whose body was truncated for detection
 
 Engine health & connection pool (refreshed every 10s):
 - `caddy_waf_engines_healthy{engine,waf_instance}` — gauge (1=healthy, 0=unhealthy)
@@ -104,6 +105,7 @@ waf_chaitin {
     max_idle 16        # max idle connections per pool
     max_cap 32         # max total connections per pool
     idle_timeout 30s   # duration string (e.g. 30s, 1m) — NOT bare integer
+    max_body_size 1MiB # bytes inspected per detection; 0 = unlimited (default)
     lb_policy round_robin  # optional; default is random
     lb_retries 1              # optional; additional Detect attempts after engine error (default: 0)
     health_fail_duration 30s  # passive health check window; 0 = disabled (default)

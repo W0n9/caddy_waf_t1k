@@ -34,6 +34,7 @@ var wafMetrics = struct {
 	poolWaitingReqs  *prometheus.GaugeVec
 	connectionErrors *prometheus.CounterVec
 	poolEvents       *prometheus.CounterVec
+	oversizeRequests prometheus.Counter
 }{}
 
 func initWAFMetrics(registry *prometheus.Registry) {
@@ -103,6 +104,13 @@ func initWAFMetrics(registry *prometheus.Registry) {
 			Name:      "pool_events_total",
 			Help:      "Total number of WAF engine pool lifecycle events by reason.",
 		}, []string{"engine", "reason", "waf_instance"})
+
+		wafMetrics.oversizeRequests = prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Subsystem: sub,
+			Name:      "oversize_requests_total",
+			Help:      "Total requests whose body was truncated for WAF detection.",
+		})
 	})
 
 	logger := caddy.Log().Named("waf.metrics")
@@ -119,6 +127,7 @@ func initWAFMetrics(registry *prometheus.Registry) {
 		{name: "pool_waiting_requests", collector: wafMetrics.poolWaitingReqs},
 		{name: "connection_errors_total", collector: wafMetrics.connectionErrors},
 		{name: "pool_events_total", collector: wafMetrics.poolEvents},
+		{name: "oversize_requests_total", collector: wafMetrics.oversizeRequests},
 	} {
 		if err := registry.Register(metric.collector); err != nil {
 			var alreadyRegisteredErr prometheus.AlreadyRegisteredError

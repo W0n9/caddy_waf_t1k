@@ -80,6 +80,7 @@ func TestWAFMetricsRegistration(t *testing.T) {
 	wafMetrics.poolWaitingReqs.WithLabelValues("127.0.0.1:8000", "1").Set(0)
 	recordConnectionError("127.0.0.1:8000", "1", reasonConnectionRefused)
 	wafMetrics.poolEvents.WithLabelValues("127.0.0.1:8000", "dial_failed", "1").Inc()
+	wafMetrics.oversizeRequests.Inc()
 
 	expected := strings.NewReader(`
 		# HELP caddy_waf_connection_errors_total Total number of WAF detection connection errors by reason.
@@ -88,6 +89,9 @@ func TestWAFMetricsRegistration(t *testing.T) {
 		# HELP caddy_waf_engines_healthy Health status of WAF engines.
 		# TYPE caddy_waf_engines_healthy gauge
 		caddy_waf_engines_healthy{engine="127.0.0.1:8000",waf_instance="1"} 1
+		# HELP caddy_waf_oversize_requests_total Total requests whose body was truncated for WAF detection.
+		# TYPE caddy_waf_oversize_requests_total counter
+		caddy_waf_oversize_requests_total 1
 		# HELP caddy_waf_pool_active_conns Number of active connections in the WAF engine pool.
 		# TYPE caddy_waf_pool_active_conns gauge
 		caddy_waf_pool_active_conns{engine="127.0.0.1:8000",waf_instance="1"} 4
@@ -108,6 +112,7 @@ func TestWAFMetricsRegistration(t *testing.T) {
 	if err := testutil.GatherAndCompare(registry, expected,
 		"caddy_waf_connection_errors_total",
 		"caddy_waf_engines_healthy",
+		"caddy_waf_oversize_requests_total",
 		"caddy_waf_pool_active_conns",
 		"caddy_waf_pool_idle_conns",
 		"caddy_waf_pool_max_conns",
