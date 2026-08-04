@@ -92,8 +92,8 @@ type CaddyWAF struct {
 	MaxCap      int           `json:"max_cap,omitempty"`
 	IdleTimeout time.Duration `json:"idle_timeout,omitempty"`
 
-	// MaxBodySize 限制送给检测引擎的请求体字节数；完整请求体仍会转发给下游。
-	// 0 保持原有的无限制检测行为。
+	// MaxBodySize limits the number of request-body bytes sent to the detection engine;
+	// the full body is still forwarded downstream. A value of 0 preserves unlimited detection.
 	MaxBodySize int64 `json:"max_body_size,omitempty"`
 
 	HealthFailDuration caddy.Duration `json:"health_fail_duration,omitempty"`
@@ -360,8 +360,8 @@ func (m *CaddyWAF) Cleanup() error {
 }
 
 var clientErrorPatterns = []string{
-	// Body() 客户端读体错误（unexpected EOF / H2 CANCEL / H3 QUIC / connection reset 等）。
-	// 引擎侧 TCP reset 不含此前缀，应计为引擎错误并进入被动健康检查。
+	// Body() client read errors (unexpected EOF / H2 CANCEL / H3 QUIC / connection reset, etc.).
+	// Engine-side TCP resets lack this prefix, so they count as engine errors and enter passive health checks.
 	"read request body",
 	"H3_REQUEST_CANCELLED",
 	"H3 error",
