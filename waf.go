@@ -116,6 +116,15 @@ type CaddyWAF struct {
 
 	instanceID string // app-lifetime-unique id for the prometheus waf_instance label
 
+	// acquiredKeys records, in Engine-pool order, the registry key acquired for
+	// each WafEngineAddr. Cleanup releases exactly these keys; on a provisioning
+	// error the keys already acquired for this instance are released again.
+	acquiredKeys []engineKey
+
+	// poolFactory, if set, replaces initDetect when building a new Engine's
+	// Connection pool (tests only).
+	poolFactory func(*t1k.PoolConfig) (*t1k.ChannelPool, error)
+
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
 	// Multiple WAF engine pools
@@ -205,27 +214,12 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		m.HealthMaxFails = 1
 	}
 
-	// Initialize multiple engines
-	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
-	for i, addr := range m.WafEngineAddrs {
-		pc := &t1k.PoolConfig{
-			InitialCap:  m.InitialCap,
-			MaxIdle:     m.MaxIdle,
-			MaxCap:      m.MaxCap,
-			Factory:     &t1k.TcpFactory{Addr: addr},
-			IdleTimeout: m.IdleTimeout,
-		}
-
-		engine, err := initDetect(pc)
-		if err != nil {
-			return fmt.Errorf("init detect error for %s: %v", addr, err)
-		}
-		m.Engines[i] = &Engine{
-			pool:         engine,
-			addr:         addr,
-			maxFails:     m.HealthMaxFails,
-			failDuration: time.Duration(m.HealthFailDuration),
-		}
+	// Acquire one shared Engine per configured address from the process-wide
+	// registry. Identical address+config keys share a single Engine (reference
+	// counted); any shaping-parameter difference yields independent Engines.
+	// A provisioning error releases every Engine already acquired.
+	if err := m.acquireEngines(); err != nil {
+		return err
 	}
 	m.logger.Info("WAF plugin instance Provisioned")
 
@@ -233,6 +227,84 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	newMetricsPoolUpdater(m).start()
 
 	return nil
+}
+
+// engineKeyFor builds the registry key that identifies one Engine for addr
+// given this instance's Connection pool and Passive health parameters.
+func (m *CaddyWAF) engineKeyFor(addr string) engineKey {
+	return engineKey{
+		addr:               addr,
+		initialCap:         m.InitialCap,
+		maxIdle:            m.MaxIdle,
+		maxCap:             m.MaxCap,
+		idleTimeout:        m.IdleTimeout,
+		healthMaxFails:     m.HealthMaxFails,
+		healthFailDuration: time.Duration(m.HealthFailDuration),
+	}
+}
+
+// newPool builds the t1k Connection pool for addr, or the injected test
+// replacement when set.
+func (m *CaddyWAF) newPool(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
+	if m.poolFactory != nil {
+		return m.poolFactory(pc)
+	}
+	return initDetect(pc)
+}
+
+// acquireEngines acquires one shared Engine per configured Engine address from
+// the process-wide registry, recording what was acquired in m.Engines and
+// m.acquiredKeys. On any error every Engine already acquired for this instance
+// is released again (provisioning rollback), so no reference leaks.
+func (m *CaddyWAF) acquireEngines() error {
+	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
+	m.acquiredKeys = make([]engineKey, 0, len(m.WafEngineAddrs))
+	for i, addr := range m.WafEngineAddrs {
+		key := m.engineKeyFor(addr)
+		engine, _, err := acquireEngine(key, func() (caddy.Destructor, error) {
+			pool, err := m.newPool(&t1k.PoolConfig{
+				InitialCap:  m.InitialCap,
+				MaxIdle:     m.MaxIdle,
+				MaxCap:      m.MaxCap,
+				Factory:     &t1k.TcpFactory{Addr: addr},
+				IdleTimeout: m.IdleTimeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &Engine{
+				pool:         pool,
+				addr:         addr,
+				maxFails:     m.HealthMaxFails,
+				failDuration: time.Duration(m.HealthFailDuration),
+			}, nil
+		})
+		if err != nil {
+			m.releaseAcquiredEngines()
+			m.Engines = nil
+			return fmt.Errorf("init detect error for %s: %v", addr, err)
+		}
+		m.Engines[i] = engine
+		m.acquiredKeys = append(m.acquiredKeys, key)
+	}
+	return nil
+}
+
+// releaseAcquiredEngines releases every registry reference this instance
+// acquired and clears the acquisition record. Used for provisioning rollback
+// and Cleanup; Connection pool teardown happens inside the Engine's Destruct,
+// deferred until the last referencing instance releases it.
+func (m *CaddyWAF) releaseAcquiredEngines() {
+	for _, key := range m.acquiredKeys {
+		if _, err := releaseEngine(key); err != nil {
+			if m.logger != nil {
+				m.logger.Warn("failed to release WAF engine",
+					zap.String("engine", key.addr),
+					zap.Error(err))
+			}
+		}
+	}
+	m.acquiredKeys = nil
 }
 
 // Validate ensures module configuration is valid.
@@ -381,11 +453,13 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 	return next.ServeHTTP(w, r)
 }
 
-// Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
+// Cleans up the WAF plugin instance by dropping its metric label series and
+// releasing the shared Engines it acquired at provisioning time. An Engine's
+// Connection pool is torn down only when the last referencing instance cleans
+// up (registry reference count hits zero).
 func (m *CaddyWAF) Cleanup() error {
 	for _, engine := range m.Engines {
 		if engine != nil {
-			engine.pool.Release()
 			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr, m.instanceID)
 			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr, m.instanceID)
 			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr, m.instanceID)
@@ -393,6 +467,7 @@ func (m *CaddyWAF) Cleanup() error {
 			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr, m.instanceID)
 		}
 	}
+	m.releaseAcquiredEngines()
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
 }
