@@ -69,23 +69,23 @@ On engine error, `countFailure()` atomically increments the engine's fail counte
 Blocked requests set `Content-Type: application/json`, `X-Event-ID`, return HTTP 501, and write `{"message":"Intercept illegal requests","event_id":"..."}` JSON from `redirectIntercept`.
 
 **Prometheus metrics:**  
-Each `waf_chaitin` provision site is its own `CaddyWAF` instance (multiple `import waf` in a Caddyfile → multiple instances). The pool/health gauges and the two counters below carry a `waf_instance` label (a per-instance id assigned in `Provision`) so series from different instances don't overwrite each other. Use `sum by (engine)(...)` for totals and `max by (engine)(caddy_waf_engines_healthy)` for health; `Cleanup` deletes that instance's gauge series on reload. `requests_total`, `detect_duration_seconds`, and `oversize_requests_total` have no `waf_instance` (multi-instance accumulate/merge is already correct).
+Engines are shared process-wide (see `engine_pool.go`); one global updater goroutine (started once by the first provisioned instance, `startGlobalMetricsUpdater`) reports every Engine in the registry on a 10s cadence. Pool/health gauges, `pool_events_total`, and `connection_errors_total` are labeled by Engine address only — there is no `waf_instance` label — so a shared Engine exposes exactly one series and `sum by (engine)(...)` / `max by (engine)(caddy_waf_engines_healthy)` work directly. `Cleanup` releases registry references; an Engine's metric series are removed by its `Destruct` when the last referencing instance releases it. `requests_total`, `detect_duration_seconds`, and `oversize_requests_total` have always been instance-independent.
 
-Request / detection (no `waf_instance`):
+Request / detection:
 - `caddy_waf_requests_total{action}` — counter (blocked/passed/error/failopen)
 - `caddy_waf_detect_duration_seconds{engine}` — histogram
 - `caddy_waf_oversize_requests_total` — counter of requests whose body was truncated for detection
 
-Engine health & connection pool (refreshed every 10s):
-- `caddy_waf_engines_healthy{engine,waf_instance}` — gauge (1=healthy, 0=unhealthy)
-- `caddy_waf_pool_idle_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_active_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_max_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_waiting_requests{engine,waf_instance}` — gauge
+Engine health & connection pool (refreshed every 10s by the single global updater):
+- `caddy_waf_engines_healthy{engine}` — gauge (1=healthy, 0=unhealthy)
+- `caddy_waf_pool_idle_conns{engine}` — gauge
+- `caddy_waf_pool_active_conns{engine}` — gauge
+- `caddy_waf_pool_max_conns{engine}` — gauge
+- `caddy_waf_pool_waiting_requests{engine}` — gauge
 
 Connection errors & pool events:
-- `caddy_waf_connection_errors_total{engine,reason,waf_instance}` — counter (Detect-layer errors: connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other)
-- `caddy_waf_pool_events_total{engine,reason,waf_instance}` — counter (pool lifecycle: dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit)
+- `caddy_waf_connection_errors_total{engine,reason}` — counter (Detect-layer errors: connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other)
+- `caddy_waf_pool_events_total{engine,reason}` — counter (pool lifecycle: dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit)
 
 Scrape via Caddy `metrics` handler or Admin API `/metrics`. See README for examples.
 

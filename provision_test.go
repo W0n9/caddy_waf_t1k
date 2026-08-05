@@ -14,9 +14,8 @@ import (
 // testWAFInstance builds a CaddyWAF ready for acquireEngines/Cleanup without a
 // caddy.Context. Config defaults satisfy t1k.ChannelPool's capacity rules with
 // InitialCap 0 (no dialing happens at construction).
-func testWAFInstance(id string, addrs []string, opts ...func(*CaddyWAF)) *CaddyWAF {
+func testWAFInstance(addrs []string, opts ...func(*CaddyWAF)) *CaddyWAF {
 	m := &CaddyWAF{
-		instanceID:         id,
 		WafEngineAddrs:     addrs,
 		InitialCap:         0,
 		MaxIdle:            1,
@@ -47,7 +46,7 @@ func withSharedPool() func(*CaddyWAF) {
 func TestAcquireEnginesRecordsPerAddress(t *testing.T) {
 	ensureWAFMetrics(t)
 	addrs := []string{"203.0.113.1:8000", "203.0.113.2:8000", "203.0.113.3:8000"}
-	m := testWAFInstance("i1", addrs)
+	m := testWAFInstance(addrs)
 
 	if err := m.acquireEngines(); err != nil {
 		t.Fatalf("acquireEngines: %v", err)
@@ -86,8 +85,8 @@ func TestAcquireEnginesRecordsPerAddress(t *testing.T) {
 func TestAcquireEnginesSharesIdenticalConfig(t *testing.T) {
 	ensureWAFMetrics(t)
 	addr := "203.0.113.10:8000"
-	m1 := testWAFInstance("i1", []string{addr})
-	m2 := testWAFInstance("i2", []string{addr})
+	m1 := testWAFInstance([]string{addr})
+	m2 := testWAFInstance([]string{addr})
 
 	if err := m1.acquireEngines(); err != nil {
 		t.Fatalf("m1 acquireEngines: %v", err)
@@ -139,8 +138,8 @@ func TestAcquireEnginesConfigDiffIsolatesEngine(t *testing.T) {
 
 	for _, v := range variants {
 		t.Run(v.name, func(t *testing.T) {
-			base := testWAFInstance("base", []string{addr}, withSharedPool())
-			variant := testWAFInstance("variant", []string{addr}, withSharedPool())
+			base := testWAFInstance([]string{addr}, withSharedPool())
+			variant := testWAFInstance([]string{addr}, withSharedPool())
 			v.apply(variant)
 
 			if err := base.acquireEngines(); err != nil {
@@ -176,7 +175,7 @@ func TestAcquireEnginesRollsBackOnError(t *testing.T) {
 		}
 		return nil, nil
 	}
-	m := testWAFInstance("i1", addrs, withPoolFactory(factory))
+	m := testWAFInstance(addrs, withPoolFactory(factory))
 
 	err := m.acquireEngines()
 	if err == nil {
@@ -203,8 +202,8 @@ func TestCleanupLastReferenceReleasesPool(t *testing.T) {
 	// 127.0.0.1:1 dials fail fast (connection refused), so pool.Get() errors are
 	// distinguishable from a released pool ("pool is closed").
 	addr := "127.0.0.1:1"
-	m1 := testWAFInstance("i1", []string{addr})
-	m2 := testWAFInstance("i2", []string{addr})
+	m1 := testWAFInstance([]string{addr})
+	m2 := testWAFInstance([]string{addr})
 
 	if err := m1.acquireEngines(); err != nil {
 		t.Fatalf("m1 acquireEngines: %v", err)

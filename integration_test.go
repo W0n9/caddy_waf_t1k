@@ -44,9 +44,8 @@ func newIntegrationWAF(t *testing.T, engine *Engine, maxBodySize int64) *CaddyWA
 	t.Helper()
 	ensureWAFMetrics(t)
 	m := &CaddyWAF{
-		logger:     zap.NewNop(),
-		instanceID: "integration",
-		Engines:    EnginePool{engine},
+		logger:  zap.NewNop(),
+		Engines: EnginePool{engine},
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &RoundRobinSelection{robin: ^uint32(0)},
 			Retries:         0,

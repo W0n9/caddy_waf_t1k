@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,11 +23,6 @@ import (
 func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
-
-// instanceSeq assigns a stable, app-lifetime-unique id to each CaddyWAF
-// instance so metrics can distinguish per-instance pools when the same
-// waf_chaitin directive is provisioned many times.
-var instanceSeq int64
 
 // maxBodySizeLimit is the largest allowed MaxBodySize. It leaves headroom so
 // prepareDetectionRequest's io.LimitReader(body, m.MaxBodySize+1) cannot
@@ -85,8 +79,11 @@ func (e *Engine) Destruct() error {
 	if wafMetrics.enginesHealthy == nil {
 		return nil
 	}
-	// DeletePartialMatch removes every series for this Engine address,
-	// regardless of other labels (currently waf_instance).
+	// DeletePartialMatch removes every gauge series for this Engine address
+	// (the only remaining label). The two counters (pool_events_total,
+	// connection_errors_total) are intentionally not deleted: they accumulate
+	// per Engine address across all instances and config generations, and
+	// Prometheus rates/increases depend on that monotonic history.
 	labels := prometheus.Labels{"engine": e.addr}
 	wafMetrics.enginesHealthy.DeletePartialMatch(labels)
 	wafMetrics.poolIdleConns.DeletePartialMatch(labels)
@@ -112,9 +109,6 @@ type EnginePool []*Engine
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
 	logger *zap.Logger
-	ctx    caddy.Context
-
-	instanceID string // app-lifetime-unique id for the prometheus waf_instance label
 
 	// acquiredKeys records, in Engine-pool order, the registry key acquired for
 	// each WafEngineAddr. Cleanup releases exactly these keys; on a provisioning
@@ -166,8 +160,6 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 // Provision sets up the WAF module.
 func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
-	m.ctx = ctx
-	m.instanceID = strconv.FormatInt(atomic.AddInt64(&instanceSeq, 1), 10)
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if len(m.WafEngineAddrs) == 0 {
@@ -224,7 +216,7 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger.Info("WAF plugin instance Provisioned")
 
 	initWAFMetrics(ctx.GetMetricsRegistry())
-	newMetricsPoolUpdater(m).start()
+	startGlobalMetricsUpdater(m.logger)
 
 	return nil
 }
@@ -414,7 +406,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 			return next.ServeHTTP(w, r)
 		}
 
-		recordConnectionError(engine.addr, m.instanceID, classifyConnectionError(err))
+		recordConnectionError(engine.addr, classifyConnectionError(err))
 
 		if !isEngineError(err) {
 			m.logger.Warn("DetectHttpRequest client error",
@@ -453,20 +445,11 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 	return next.ServeHTTP(w, r)
 }
 
-// Cleans up the WAF plugin instance by dropping its metric label series and
-// releasing the shared Engines it acquired at provisioning time. An Engine's
-// Connection pool is torn down only when the last referencing instance cleans
-// up (registry reference count hits zero).
+// Cleanup releases the shared Engines this instance acquired at provisioning
+// time. Metric series are per-Engine and are removed by the Engine's Destruct
+// when the last referencing instance cleans up (registry reference count hits
+// zero); the global metrics updater keeps running for the remaining Engines.
 func (m *CaddyWAF) Cleanup() error {
-	for _, engine := range m.Engines {
-		if engine != nil {
-			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolMaxConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr, m.instanceID)
-		}
-	}
 	m.releaseAcquiredEngines()
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil

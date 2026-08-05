@@ -155,8 +155,8 @@ func TestEngineRegistryReleaseLastReferenceDestructs(t *testing.T) {
 	}
 
 	// Pre-populate metric series for the Engine's address, as the production
-	// per-instance updater would. t.Cleanup guards against leaking series into
-	// later tests if an assertion fails mid-test.
+	// global updater would. t.Cleanup guards against leaking series into later
+	// tests if an assertion fails mid-test.
 	seriesLabels := prometheus.Labels{"engine": addr}
 	t.Cleanup(func() {
 		wafMetrics.enginesHealthy.DeletePartialMatch(seriesLabels)
@@ -165,11 +165,11 @@ func TestEngineRegistryReleaseLastReferenceDestructs(t *testing.T) {
 		wafMetrics.poolMaxConns.DeletePartialMatch(seriesLabels)
 		wafMetrics.poolWaitingReqs.DeletePartialMatch(seriesLabels)
 	})
-	wafMetrics.enginesHealthy.WithLabelValues(addr, "i1").Set(1)
-	wafMetrics.poolIdleConns.WithLabelValues(addr, "i1").Set(2)
-	wafMetrics.poolActiveConns.WithLabelValues(addr, "i1").Set(3)
-	wafMetrics.poolMaxConns.WithLabelValues(addr, "i1").Set(4)
-	wafMetrics.poolWaitingReqs.WithLabelValues(addr, "i1").Set(0)
+	wafMetrics.enginesHealthy.WithLabelValues(addr).Set(1)
+	wafMetrics.poolIdleConns.WithLabelValues(addr).Set(2)
+	wafMetrics.poolActiveConns.WithLabelValues(addr).Set(3)
+	wafMetrics.poolMaxConns.WithLabelValues(addr).Set(4)
+	wafMetrics.poolWaitingReqs.WithLabelValues(addr).Set(0)
 
 	e1, _, err := acquireEngine(key, construct)
 	if err != nil {
