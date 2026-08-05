@@ -16,6 +16,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"go.uber.org/zap"
 )
@@ -34,12 +35,16 @@ var instanceSeq int64
 // overflow int64.
 const maxBodySizeLimit = 1<<63 - 2
 
-// Engine wraps a t1k.ChannelPool with per-engine health state.
+// Engine wraps a t1k.ChannelPool with per-engine health state. An Engine is
+// self-contained: it owns its Passive health check parameters
+// (health_max_fails / health_fail_duration) and its own teardown, so
+// availability decisions on a shared Engine are unambiguous.
 type Engine struct {
-	pool     *t1k.ChannelPool
-	addr     string
-	fails    int64 // atomic: unexpired failure count
-	maxFails int
+	pool         *t1k.ChannelPool
+	addr         string
+	fails        int64 // atomic: unexpired failure count
+	maxFails     int
+	failDuration time.Duration
 	// detectFn, if set, replaces pool.DetectHttpRequest (tests only).
 	detectFn func(*http.Request) (*detection.Result, error)
 }
@@ -57,6 +62,38 @@ func (e *Engine) Fails() int {
 
 func (e *Engine) countFail(delta int) {
 	atomic.AddInt64(&e.fails, int64(delta))
+}
+
+// fail counts one detection failure against this Engine's passive health
+// window. A zero failDuration disables health checking entirely.
+func (e *Engine) fail() {
+	d := e.failDuration
+	if d <= 0 {
+		return
+	}
+	e.countFail(1)
+	time.AfterFunc(d, func() { e.countFail(-1) })
+}
+
+// Destruct tears the Engine down: it releases the Connection pool and removes
+// this Engine's metric label series. The registry calls it when the last
+// reference to the Engine is released.
+func (e *Engine) Destruct() error {
+	if e.pool != nil {
+		e.pool.Release()
+	}
+	if wafMetrics.enginesHealthy == nil {
+		return nil
+	}
+	// DeletePartialMatch removes every series for this Engine address,
+	// regardless of other labels (currently waf_instance).
+	labels := prometheus.Labels{"engine": e.addr}
+	wafMetrics.enginesHealthy.DeletePartialMatch(labels)
+	wafMetrics.poolIdleConns.DeletePartialMatch(labels)
+	wafMetrics.poolActiveConns.DeletePartialMatch(labels)
+	wafMetrics.poolMaxConns.DeletePartialMatch(labels)
+	wafMetrics.poolWaitingReqs.DeletePartialMatch(labels)
+	return nil
 }
 
 func (e *Engine) Available() bool {
@@ -184,9 +221,10 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 			return fmt.Errorf("init detect error for %s: %v", addr, err)
 		}
 		m.Engines[i] = &Engine{
-			pool:     engine,
-			addr:     addr,
-			maxFails: m.HealthMaxFails,
+			pool:         engine,
+			addr:         addr,
+			maxFails:     m.HealthMaxFails,
+			failDuration: time.Duration(m.HealthFailDuration),
 		}
 	}
 	m.logger.Info("WAF plugin instance Provisioned")
@@ -324,7 +362,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 			zap.Int("attempt", attempt+1),
 			zap.Int("max_attempts", maxAttempts),
 			zap.Error(err))
-		m.countFailure(engine)
+		engine.fail()
 		tried[engine] = struct{}{}
 
 		// More attempts allowed and at least one untried engine may remain.
@@ -383,19 +421,6 @@ func isEngineError(err error) bool {
 	return true
 }
 
-func (m *CaddyWAF) countFailure(engine *Engine) {
-	failDuration := time.Duration(m.HealthFailDuration)
-	if failDuration == 0 {
-		return
-	}
-	engine.countFail(1)
-	go func() {
-		timer := time.NewTimer(failDuration)
-		<-timer.C
-		engine.countFail(-1)
-	}()
-}
-
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*CaddyWAF)(nil)
@@ -403,4 +428,5 @@ var (
 	_ caddy.CleanerUpper          = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
+	_ caddy.Destructor            = (*Engine)(nil)
 )
