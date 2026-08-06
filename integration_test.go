@@ -6,24 +6,22 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	t1k "github.com/chaitin/t1k-go"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	t1k "github.com/chaitin/t1k-go"
 	"go.uber.org/zap"
 )
 
-// engineFromEnv creates a real Engine backed by the address in $T1K_ADDR.
-// The test is skipped (not failed) when T1K_ADDR is unset.
+// engineFromEnv creates a real Engine backed by the first address in
+// $T1K_ADDR (a multi-address T1K_ADDR is split by engineAddrsFromEnv and the
+// first entry is used; single-address runs behave as before). The test is
+// skipped (not failed) when T1K_ADDR is unset.
 func engineFromEnv(t *testing.T) *Engine {
 	t.Helper()
-	addr := os.Getenv("T1K_ADDR")
-	if addr == "" {
-		t.Skip("T1K_ADDR not set; skipping real-engine integration test")
-	}
+	addr := engineAddrsFromEnv(t)[0]
 	pool, err := t1k.NewChannelPool(&t1k.PoolConfig{
 		InitialCap:  1,
 		MaxIdle:     4,
@@ -44,9 +42,8 @@ func newIntegrationWAF(t *testing.T, engine *Engine, maxBodySize int64) *CaddyWA
 	t.Helper()
 	ensureWAFMetrics(t)
 	m := &CaddyWAF{
-		logger:     zap.NewNop(),
-		instanceID: "integration",
-		Engines:    EnginePool{engine},
+		logger:  zap.NewNop(),
+		Engines: EnginePool{engine},
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &RoundRobinSelection{robin: ^uint32(0)},
 			Retries:         0,

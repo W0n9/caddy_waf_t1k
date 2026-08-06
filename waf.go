@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"go.uber.org/zap"
 )
@@ -24,22 +24,24 @@ func init() {
 	caddy.RegisterModule(CaddyWAF{})
 }
 
-// instanceSeq assigns a stable, app-lifetime-unique id to each CaddyWAF
-// instance so metrics can distinguish per-instance pools when the same
-// waf_chaitin directive is provisioned many times.
-var instanceSeq int64
-
 // maxBodySizeLimit is the largest allowed MaxBodySize. It leaves headroom so
 // prepareDetectionRequest's io.LimitReader(body, m.MaxBodySize+1) cannot
 // overflow int64.
 const maxBodySizeLimit = 1<<63 - 2
 
-// Engine wraps a t1k.ChannelPool with per-engine health state.
+// Engine wraps a t1k.ChannelPool with per-engine health state. An Engine is
+// self-contained: it owns its Passive health check parameters
+// (health_max_fails / health_fail_duration) and its own teardown, so
+// availability decisions on a shared Engine are unambiguous.
 type Engine struct {
-	pool     *t1k.ChannelPool
-	addr     string
-	fails    int64 // atomic: unexpired failure count
-	maxFails int
+	pool         *t1k.ChannelPool
+	addr         string
+	fails        int64 // atomic: unexpired failure count
+	maxFails     int
+	failDuration time.Duration
+	// destroyed is set once by Destruct; it tells the metrics updater not to
+	// recreate this Engine's gauge series after teardown.
+	destroyed atomic.Bool
 	// detectFn, if set, replaces pool.DetectHttpRequest (tests only).
 	detectFn func(*http.Request) (*detection.Result, error)
 }
@@ -59,6 +61,67 @@ func (e *Engine) countFail(delta int) {
 	atomic.AddInt64(&e.fails, int64(delta))
 }
 
+// fail counts one detection failure against this Engine's passive health
+// window. A zero failDuration disables health checking entirely.
+func (e *Engine) fail() {
+	d := e.failDuration
+	if d <= 0 {
+		return
+	}
+	e.countFail(1)
+	time.AfterFunc(d, func() { e.countFail(-1) })
+}
+
+// Destruct tears the Engine down: it releases the Connection pool and removes
+// this Engine's metric label series. The registry calls it when the last
+// reference to the Engine is released. It is idempotent, and it marks the
+// Engine destroyed so the metrics updater does not recreate its series after
+// teardown.
+func (e *Engine) Destruct() error {
+	if !e.destroyed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if e.pool != nil {
+		e.pool.Release()
+	}
+	if wafMetrics.enginesHealthy == nil {
+		return nil
+	}
+	// DeletePartialMatch removes every gauge series for this Engine address
+	// (the only remaining label), but only when no other Engine still holds
+	// the address — otherwise a differently-shaped Engine sharing it would
+	// lose its series until the next metrics tick recreates it. The two
+	// counters (pool_events_total, connection_errors_total) are intentionally
+	// not deleted: they accumulate per Engine address across all instances and
+	// config generations, and Prometheus rates/increases depend on that
+	// monotonic history.
+	if hasEngineForAddr(e.addr, e) {
+		return nil
+	}
+	labels := prometheus.Labels{"engine": e.addr}
+	wafMetrics.enginesHealthy.DeletePartialMatch(labels)
+	wafMetrics.poolIdleConns.DeletePartialMatch(labels)
+	wafMetrics.poolActiveConns.DeletePartialMatch(labels)
+	wafMetrics.poolMaxConns.DeletePartialMatch(labels)
+	wafMetrics.poolWaitingReqs.DeletePartialMatch(labels)
+	return nil
+}
+
+// hasEngineForAddr reports whether the registry still holds a live (not yet
+// destroyed) Engine with the same address as addr, excluding e. When it does,
+// that Engine's gauge series must survive e's teardown.
+func hasEngineForAddr(addr string, excluding *Engine) bool {
+	found := false
+	engineRegistry.Range(func(_, value any) bool {
+		if other, ok := value.(*Engine); ok && other != excluding && !other.destroyed.Load() && other.addr == addr {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func (e *Engine) Available() bool {
 	if e.maxFails <= 0 {
 		return true
@@ -66,7 +129,13 @@ func (e *Engine) Available() bool {
 	return e.Fails() < e.maxFails
 }
 
+// poolStats snapshots the Engine's Connection pool. A nil pool (test-only
+// injection) yields an empty snapshot so the metrics updater never panics on a
+// nil dereference.
 func (e *Engine) poolStats() t1k.PoolStats {
+	if e.pool == nil {
+		return t1k.PoolStats{}
+	}
 	return e.pool.Stats()
 }
 
@@ -75,9 +144,15 @@ type EnginePool []*Engine
 // CaddyWAF implements an HTTP handler for WAF.
 type CaddyWAF struct {
 	logger *zap.Logger
-	ctx    caddy.Context
 
-	instanceID string // app-lifetime-unique id for the prometheus waf_instance label
+	// acquiredKeys records, in Engine-pool order, the registry key acquired for
+	// each WafEngineAddr. Cleanup releases exactly these keys; on a provisioning
+	// error the keys already acquired for this instance are released again.
+	acquiredKeys []engineKey
+
+	// poolFactory, if set, replaces initDetect when building a new Engine's
+	// Connection pool (tests only).
+	poolFactory func(*t1k.PoolConfig) (*t1k.ChannelPool, error)
 
 	WafEngineAddrs []string `json:"waf_engine_addrs,omitempty"` // WAF Engine address, expects a URL or IP address
 
@@ -120,8 +195,6 @@ func initDetect(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
 // Provision sets up the WAF module.
 func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
-	m.ctx = ctx
-	m.instanceID = strconv.FormatInt(atomic.AddInt64(&instanceSeq, 1), 10)
 	m.logger.Info("Provisioning WAF plugin instance")
 
 	if len(m.WafEngineAddrs) == 0 {
@@ -168,33 +241,97 @@ func (m *CaddyWAF) Provision(ctx caddy.Context) error {
 		m.HealthMaxFails = 1
 	}
 
-	// Initialize multiple engines
-	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
-	for i, addr := range m.WafEngineAddrs {
-		pc := &t1k.PoolConfig{
-			InitialCap:  m.InitialCap,
-			MaxIdle:     m.MaxIdle,
-			MaxCap:      m.MaxCap,
-			Factory:     &t1k.TcpFactory{Addr: addr},
-			IdleTimeout: m.IdleTimeout,
-		}
-
-		engine, err := initDetect(pc)
-		if err != nil {
-			return fmt.Errorf("init detect error for %s: %v", addr, err)
-		}
-		m.Engines[i] = &Engine{
-			pool:     engine,
-			addr:     addr,
-			maxFails: m.HealthMaxFails,
-		}
+	// Acquire one shared Engine per configured address from the process-wide
+	// registry. Identical address+config keys share a single Engine (reference
+	// counted); any shaping-parameter difference yields independent Engines.
+	// A provisioning error releases every Engine already acquired.
+	if err := m.acquireEngines(); err != nil {
+		return err
 	}
 	m.logger.Info("WAF plugin instance Provisioned")
 
 	initWAFMetrics(ctx.GetMetricsRegistry())
-	newMetricsPoolUpdater(m).start()
+	startGlobalMetricsUpdater(m.logger)
 
 	return nil
+}
+
+// engineKeyFor builds the registry key that identifies one Engine for addr
+// given this instance's Connection pool and Passive health parameters.
+func (m *CaddyWAF) engineKeyFor(addr string) engineKey {
+	return engineKey{
+		addr:               addr,
+		initialCap:         m.InitialCap,
+		maxIdle:            m.MaxIdle,
+		maxCap:             m.MaxCap,
+		idleTimeout:        m.IdleTimeout,
+		healthMaxFails:     m.HealthMaxFails,
+		healthFailDuration: time.Duration(m.HealthFailDuration),
+	}
+}
+
+// newPool builds the t1k Connection pool for addr, or the injected test
+// replacement when set.
+func (m *CaddyWAF) newPool(pc *t1k.PoolConfig) (*t1k.ChannelPool, error) {
+	if m.poolFactory != nil {
+		return m.poolFactory(pc)
+	}
+	return initDetect(pc)
+}
+
+// acquireEngines acquires one shared Engine per configured Engine address from
+// the process-wide registry, recording what was acquired in m.Engines and
+// m.acquiredKeys. On any error every Engine already acquired for this instance
+// is released again (provisioning rollback), so no reference leaks.
+func (m *CaddyWAF) acquireEngines() error {
+	m.Engines = make(EnginePool, len(m.WafEngineAddrs))
+	m.acquiredKeys = make([]engineKey, 0, len(m.WafEngineAddrs))
+	for i, addr := range m.WafEngineAddrs {
+		key := m.engineKeyFor(addr)
+		engine, _, err := acquireEngine(key, func() (caddy.Destructor, error) {
+			pool, err := m.newPool(&t1k.PoolConfig{
+				InitialCap:  m.InitialCap,
+				MaxIdle:     m.MaxIdle,
+				MaxCap:      m.MaxCap,
+				Factory:     &t1k.TcpFactory{Addr: addr},
+				IdleTimeout: m.IdleTimeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &Engine{
+				pool:         pool,
+				addr:         addr,
+				maxFails:     m.HealthMaxFails,
+				failDuration: time.Duration(m.HealthFailDuration),
+			}, nil
+		})
+		if err != nil {
+			m.releaseAcquiredEngines()
+			m.Engines = nil
+			return fmt.Errorf("init detect error for %s: %v", addr, err)
+		}
+		m.Engines[i] = engine
+		m.acquiredKeys = append(m.acquiredKeys, key)
+	}
+	return nil
+}
+
+// releaseAcquiredEngines releases every registry reference this instance
+// acquired and clears the acquisition record. Used for provisioning rollback
+// and Cleanup; Connection pool teardown happens inside the Engine's Destruct,
+// deferred until the last referencing instance releases it.
+func (m *CaddyWAF) releaseAcquiredEngines() {
+	for _, key := range m.acquiredKeys {
+		if _, err := releaseEngine(key); err != nil {
+			if m.logger != nil {
+				m.logger.Warn("failed to release WAF engine",
+					zap.String("engine", key.addr),
+					zap.Error(err))
+			}
+		}
+	}
+	m.acquiredKeys = nil
 }
 
 // Validate ensures module configuration is valid.
@@ -304,7 +441,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 			return next.ServeHTTP(w, r)
 		}
 
-		recordConnectionError(engine.addr, m.instanceID, classifyConnectionError(err))
+		recordConnectionError(engine.addr, classifyConnectionError(err))
 
 		if !isEngineError(err) {
 			m.logger.Warn("DetectHttpRequest client error",
@@ -324,7 +461,7 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 			zap.Int("attempt", attempt+1),
 			zap.Int("max_attempts", maxAttempts),
 			zap.Error(err))
-		m.countFailure(engine)
+		engine.fail()
 		tried[engine] = struct{}{}
 
 		// More attempts allowed and at least one untried engine may remain.
@@ -343,18 +480,12 @@ func (m *CaddyWAF) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyh
 	return next.ServeHTTP(w, r)
 }
 
-// Cleans up the WAF plugin instance by closing the WAF engine and logging the cleanup process.
+// Cleanup releases the shared Engines this instance acquired at provisioning
+// time. Metric series are per-Engine and are removed by the Engine's Destruct
+// when the last referencing instance cleans up (registry reference count hits
+// zero); the global metrics updater keeps running for the remaining Engines.
 func (m *CaddyWAF) Cleanup() error {
-	for _, engine := range m.Engines {
-		if engine != nil {
-			engine.pool.Release()
-			wafMetrics.enginesHealthy.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolIdleConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolActiveConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolMaxConns.DeleteLabelValues(engine.addr, m.instanceID)
-			wafMetrics.poolWaitingReqs.DeleteLabelValues(engine.addr, m.instanceID)
-		}
-	}
+	m.releaseAcquiredEngines()
 	m.logger.Info("Cleaning up WAF plugin instance")
 	return nil
 }
@@ -383,19 +514,6 @@ func isEngineError(err error) bool {
 	return true
 }
 
-func (m *CaddyWAF) countFailure(engine *Engine) {
-	failDuration := time.Duration(m.HealthFailDuration)
-	if failDuration == 0 {
-		return
-	}
-	engine.countFail(1)
-	go func() {
-		timer := time.NewTimer(failDuration)
-		<-timer.C
-		engine.countFail(-1)
-	}()
-}
-
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*CaddyWAF)(nil)
@@ -403,4 +521,5 @@ var (
 	_ caddy.CleanerUpper          = (*CaddyWAF)(nil)
 	_ caddyhttp.MiddlewareHandler = (*CaddyWAF)(nil)
 	_ caddyfile.Unmarshaler       = (*CaddyWAF)(nil)
+	_ caddy.Destructor            = (*Engine)(nil)
 )
