@@ -19,6 +19,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -43,7 +44,7 @@ func engineAddrsFromEnv(t *testing.T) []string {
 		t.Skip("T1K_ADDR not set; skipping real-engine integration test")
 	}
 	var addrs []string
-	for _, a := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' }) {
+	for _, a := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || unicode.IsSpace(r) }) {
 		if a != "" {
 			addrs = append(addrs, a)
 		}
@@ -90,6 +91,11 @@ func TestIntegrationSharedPoolRefcountAndConnectionCount(t *testing.T) {
 	if err := m1.acquireEngines(); err != nil {
 		t.Fatalf("m1 acquireEngines: %v", err)
 	}
+	// Register cleanup immediately after each successful acquire so a later
+	// failure path (t.Fatalf) cannot leak the acquired references into the
+	// process-wide registry. Cleanup is idempotent, so these deferred calls
+	// and the explicit Cleanup calls below may both run safely.
+	t.Cleanup(func() { _ = m1.Cleanup() })
 	// Baseline open connections per pool before the second instance acquires:
 	// ActiveConns is t1k's openingConns (total open connections, idle + in-use),
 	// which the first acquire established via InitialCap 1.
@@ -101,12 +107,7 @@ func TestIntegrationSharedPoolRefcountAndConnectionCount(t *testing.T) {
 	if err := m2.acquireEngines(); err != nil {
 		t.Fatalf("m2 acquireEngines: %v", err)
 	}
-	// Acquire failures are handled above; from here on every exit path must
-	// release the acquired references so no Engine leaks into later tests.
-	t.Cleanup(func() {
-		_ = m1.Cleanup()
-		_ = m2.Cleanup()
-	})
+	t.Cleanup(func() { _ = m2.Cleanup() })
 
 	// Distinct Engine addresses must map to distinct Engines (per-address
 	// independence); the two instances then share one Engine per address.
