@@ -233,18 +233,23 @@ func TestMetricsUpdaterOneSeriesPerEngine(t *testing.T) {
 		testEngineKey("127.0.0.1:8005"),
 		testEngineKey("127.0.0.1:8006"),
 	}
-	for _, key := range keys {
-		if _, _, err := acquireEngine(key, testMetricsEngineConstructor(key.addr)); err != nil {
-			t.Fatalf("acquire %s: %v", key.addr, err)
-		}
-	}
+	// Register the release before acquiring so an acquire failure cannot leak
+	// already-acquired Engines into the process-wide registry; release only
+	// keys that were actually acquired.
+	var acquired []engineKey
 	t.Cleanup(func() {
-		for _, key := range keys {
+		for _, key := range acquired {
 			if _, err := releaseEngine(key); err != nil {
 				t.Errorf("release %s: %v", key.addr, err)
 			}
 		}
 	})
+	for _, key := range keys {
+		if _, _, err := acquireEngine(key, testMetricsEngineConstructor(key.addr)); err != nil {
+			t.Fatalf("acquire %s: %v", key.addr, err)
+		}
+		acquired = append(acquired, key)
+	}
 	t.Cleanup(func() { cleanupEngineSeries(t, "127.0.0.1:8005", "127.0.0.1:8006") })
 
 	updater := &globalMetricsUpdater{eventState: make(map[*Engine]*enginePoolEventState)}
@@ -319,5 +324,48 @@ func TestWAFMetricsRegistration(t *testing.T) {
 
 	if got := testutil.ToFloat64(wafMetrics.poolEvents.WithLabelValues("127.0.0.1:8000", "dial_failed")); got < 1 {
 		t.Fatalf("pool_events_total dial_failed = %v, want >= 1", got)
+	}
+}
+
+// TestReportEngineSkipsDestroyedEngine proves the updater does not recreate a
+// gauge series for an Engine whose Destruct already removed it (the teardown /
+// updater race). The series deleted by Destruct stays deleted.
+func TestReportEngineSkipsDestroyedEngine(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	initWAFMetrics(registry)
+	addr := "127.0.0.1:8010"
+	t.Cleanup(func() { cleanupEngineSeries(t, addr) })
+
+	e := testMetricsEngine(addr)
+	updater := &globalMetricsUpdater{eventState: make(map[*Engine]*enginePoolEventState)}
+
+	// A live Engine reports its series.
+	updater.reportEngine(e)
+	if got := testutil.ToFloat64(wafMetrics.enginesHealthy.WithLabelValues(addr)); got != 1 {
+		t.Fatalf("live Engine health = %v, want 1", got)
+	}
+
+	// After Destruct the series are gone; a late reportEngine must not recreate
+	// them.
+	if err := e.Destruct(); err != nil {
+		t.Fatalf("Destruct: %v", err)
+	}
+	if deleted := wafMetrics.enginesHealthy.DeletePartialMatch(prometheus.Labels{"engine": addr}); deleted != 0 {
+		t.Fatalf("series not removed by Destruct (found %d), want 0", deleted)
+	}
+	updater.reportEngine(e)
+	if got := testutil.ToFloat64(wafMetrics.enginesHealthy.WithLabelValues(addr)); got != 0 {
+		t.Fatalf("destroyed Engine health = %v, want 0 (series must stay deleted)", got)
+	}
+}
+
+// TestPoolStatsNilPoolIsSafe proves a nil Connection pool (test-only injection)
+// yields an empty snapshot instead of panicking, so the metrics updater never
+// crashes on it.
+func TestPoolStatsNilPoolIsSafe(t *testing.T) {
+	e := &Engine{addr: "127.0.0.1:8011", maxFails: 1}
+	stats := e.poolStats()
+	if stats.ActiveConns != 0 || stats.MaxActive != 0 {
+		t.Fatalf("nil-pool stats = %+v, want zero snapshot", stats)
 	}
 }

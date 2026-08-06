@@ -8,6 +8,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	t1k "github.com/chaitin/t1k-go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // testEngineKey returns a fully-populated engineKey for registry tests.
@@ -273,5 +274,56 @@ func TestEngineRegistryReferenceCountZeroRemovesKey(t *testing.T) {
 	}
 	if _, ok := engineRegistry.References(key); ok {
 		t.Fatal("key must be removed from the registry once its reference count reaches zero")
+	}
+}
+
+// TestDestructKeepsSeriesForSameAddressEngine proves that tearing down one
+// Engine whose address is still held by another (differently-shaped) Engine
+// does not remove the surviving Engine's gauge series. Per-address series
+// cleanup must be coordinated at the address level, not per Engine.
+func TestDestructKeepsSeriesForSameAddressEngine(t *testing.T) {
+	ensureWAFMetrics(t)
+	addr := "127.0.0.1:8012"
+	t.Cleanup(func() { cleanupEngineSeries(t, addr) })
+
+	// Two Engines, same address, different shaping (max_cap differs).
+	keyA := testEngineKey(addr)
+	keyB := testEngineKey(addr)
+	keyB.maxCap = 64
+
+	eA, _, err := acquireEngine(keyA, testEngineConstructor(addr))
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+	eB, _, err := acquireEngine(keyB, testEngineConstructor(addr))
+	if err != nil {
+		t.Fatalf("acquire B: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = releaseEngine(keyA)
+		_, _ = releaseEngine(keyB)
+	})
+
+	// Pre-populate the address series, as the global updater would.
+	wafMetrics.enginesHealthy.WithLabelValues(addr).Set(1)
+	wafMetrics.poolIdleConns.WithLabelValues(addr).Set(2)
+
+	// Destruct A. B still holds the address, so the series must survive.
+	if err := eA.Destruct(); err != nil {
+		t.Fatalf("eA Destruct: %v", err)
+	}
+	if got := testutil.ToFloat64(wafMetrics.enginesHealthy.WithLabelValues(addr)); got != 1 {
+		t.Fatalf("engines_healthy after A Destruct = %v, want 1 (B survives)", got)
+	}
+	if got := testutil.ToFloat64(wafMetrics.poolIdleConns.WithLabelValues(addr)); got != 2 {
+		t.Fatalf("pool_idle_conns after A Destruct = %v, want 2 (B survives)", got)
+	}
+
+	// Now Destruct B; no Engine holds the address, so the series are removed.
+	if err := eB.Destruct(); err != nil {
+		t.Fatalf("eB Destruct: %v", err)
+	}
+	if deleted := wafMetrics.enginesHealthy.DeletePartialMatch(prometheus.Labels{"engine": addr}); deleted != 0 {
+		t.Fatalf("engines_healthy not removed after last same-address Destruct (%d left), want 0", deleted)
 	}
 }

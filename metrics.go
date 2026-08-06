@@ -183,6 +183,20 @@ func startGlobalMetricsUpdater(logger *zap.Logger) {
 }
 
 func (u *globalMetricsUpdater) loop() {
+	u.safeUpdate()
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		u.safeUpdate()
+	}
+}
+
+// safeUpdate runs one update pass, containing any panic so the 10s cadence
+// survives a single bad scan. A panic in one iteration (e.g. a malformed
+// registry entry) must not take the updater goroutine down for the process
+// lifetime — startMetricsUpdaterOnce cannot restart it.
+func (u *globalMetricsUpdater) safeUpdate() {
 	defer func() {
 		if err := recover(); err != nil {
 			if u.logger != nil {
@@ -197,12 +211,6 @@ func (u *globalMetricsUpdater) loop() {
 	}()
 
 	u.update()
-
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		u.update()
-	}
 }
 
 // update reports every Engine currently in the registry. It runs inside the
@@ -231,6 +239,12 @@ func (u *globalMetricsUpdater) update() {
 }
 
 func (u *globalMetricsUpdater) reportEngine(engine *Engine) {
+	// Skip an Engine that left the registry mid-scan: its Destruct already
+	// released the pool and removed its gauge series, and recreating them here
+	// would leak a dead series.
+	if engine.destroyed.Load() {
+		return
+	}
 	healthy := 0.0
 	if engine.Available() {
 		healthy = 1.0

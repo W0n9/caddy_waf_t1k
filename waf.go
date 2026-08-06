@@ -39,6 +39,9 @@ type Engine struct {
 	fails        int64 // atomic: unexpired failure count
 	maxFails     int
 	failDuration time.Duration
+	// destroyed is set once by Destruct; it tells the metrics updater not to
+	// recreate this Engine's gauge series after teardown.
+	destroyed atomic.Bool
 	// detectFn, if set, replaces pool.DetectHttpRequest (tests only).
 	detectFn func(*http.Request) (*detection.Result, error)
 }
@@ -71,8 +74,13 @@ func (e *Engine) fail() {
 
 // Destruct tears the Engine down: it releases the Connection pool and removes
 // this Engine's metric label series. The registry calls it when the last
-// reference to the Engine is released.
+// reference to the Engine is released. It is idempotent, and it marks the
+// Engine destroyed so the metrics updater does not recreate its series after
+// teardown.
 func (e *Engine) Destruct() error {
+	if !e.destroyed.CompareAndSwap(false, true) {
+		return nil
+	}
 	if e.pool != nil {
 		e.pool.Release()
 	}
@@ -80,10 +88,16 @@ func (e *Engine) Destruct() error {
 		return nil
 	}
 	// DeletePartialMatch removes every gauge series for this Engine address
-	// (the only remaining label). The two counters (pool_events_total,
-	// connection_errors_total) are intentionally not deleted: they accumulate
-	// per Engine address across all instances and config generations, and
-	// Prometheus rates/increases depend on that monotonic history.
+	// (the only remaining label), but only when no other Engine still holds
+	// the address — otherwise a differently-shaped Engine sharing it would
+	// lose its series until the next metrics tick recreates it. The two
+	// counters (pool_events_total, connection_errors_total) are intentionally
+	// not deleted: they accumulate per Engine address across all instances and
+	// config generations, and Prometheus rates/increases depend on that
+	// monotonic history.
+	if hasEngineForAddr(e.addr, e) {
+		return nil
+	}
 	labels := prometheus.Labels{"engine": e.addr}
 	wafMetrics.enginesHealthy.DeletePartialMatch(labels)
 	wafMetrics.poolIdleConns.DeletePartialMatch(labels)
@@ -93,6 +107,21 @@ func (e *Engine) Destruct() error {
 	return nil
 }
 
+// hasEngineForAddr reports whether the registry still holds a live (not yet
+// destroyed) Engine with the same address as addr, excluding e. When it does,
+// that Engine's gauge series must survive e's teardown.
+func hasEngineForAddr(addr string, excluding *Engine) bool {
+	found := false
+	engineRegistry.Range(func(_, value any) bool {
+		if other, ok := value.(*Engine); ok && other != excluding && !other.destroyed.Load() && other.addr == addr {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 func (e *Engine) Available() bool {
 	if e.maxFails <= 0 {
 		return true
@@ -100,7 +129,13 @@ func (e *Engine) Available() bool {
 	return e.Fails() < e.maxFails
 }
 
+// poolStats snapshots the Engine's Connection pool. A nil pool (test-only
+// injection) yields an empty snapshot so the metrics updater never panics on a
+// nil dereference.
 func (e *Engine) poolStats() t1k.PoolStats {
+	if e.pool == nil {
+		return t1k.PoolStats{}
+	}
 	return e.pool.Stats()
 }
 

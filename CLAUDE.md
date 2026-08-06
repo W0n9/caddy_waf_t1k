@@ -50,7 +50,7 @@ Five core source files plus metrics/error helpers:
 | File | Responsibility |
 |------|---------------|
 | `waf.go` | Module registration, `Engine` wrapper struct (self-contained health: `fail()`/`Destruct()`), `Provision` (acquire Engines from the registry), `ServeHTTP` (detect + block + metrics), `Cleanup` (release registry references), error classification (`isEngineError`) |
-| `engine_pool.go` | Process-wide, reference-counted Engine registry (`caddy.UsagePool`): `engineKey` (address + all pool/health params), `acquireEngine`/`releaseEngine`, `Engine.Destruct()` (pool release + metric series removal) |
+| `engine_pool.go` | Process-wide, reference-counted Engine registry (`caddy.UsagePool`): `engineKey` (address + all pool/health params), `acquireEngine`/`releaseEngine` (the registry invokes `Engine.Destruct()` on final release) |
 | `caddyfile.go` | Caddyfile directive parsing (`waf_chaitin { ... }`) |
 | `load_balancer.go` | `Selector` interface + `RandomSelection` / `RoundRobinSelection` implementations (skip unhealthy engines) |
 | `rule.go` | `redirectIntercept` — writes the block response when a request is flagged |
