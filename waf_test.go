@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/chaitin/t1k-go/detection"
 	"github.com/prometheus/client_golang/prometheus"
@@ -201,44 +200,41 @@ func TestSelectRandomHostEmptyPool(t *testing.T) {
 	}
 }
 
-func TestCountFailureDisabledWhenZeroDuration(t *testing.T) {
-	m := &CaddyWAF{HealthFailDuration: 0}
+func TestEngineFailDisabledWhenZeroDuration(t *testing.T) {
 	e := &Engine{maxFails: 1}
 
-	m.countFailure(e)
+	e.fail()
 
 	if got := e.Fails(); got != 0 {
-		t.Errorf("countFailure should be no-op when HealthFailDuration=0, got Fails()=%d", got)
+		t.Errorf("fail should be no-op when failDuration=0, got Fails()=%d", got)
 	}
 }
 
-func TestCountFailureIncrementsAndDecrements(t *testing.T) {
-	m := &CaddyWAF{HealthFailDuration: caddy.Duration(100 * time.Millisecond)}
-	e := &Engine{maxFails: 3}
+func TestEngineFailIncrementsAndDecrements(t *testing.T) {
+	e := &Engine{maxFails: 3, failDuration: 100 * time.Millisecond}
 
-	m.countFailure(e)
+	e.fail()
 	if got := e.Fails(); got != 1 {
-		t.Errorf("after countFailure: Fails() = %d, want 1", got)
+		t.Errorf("after fail: Fails() = %d, want 1", got)
 	}
 
-	m.countFailure(e)
+	e.fail()
 	if got := e.Fails(); got != 2 {
-		t.Errorf("after second countFailure: Fails() = %d, want 2", got)
+		t.Errorf("after second fail: Fails() = %d, want 2", got)
 	}
 
-	// Wait for timers to expire
+	// Wait for the decay window to expire.
 	time.Sleep(200 * time.Millisecond)
 
 	if got := e.Fails(); got != 0 {
-		t.Errorf("after timer expiry: Fails() = %d, want 0", got)
+		t.Errorf("after window expiry: Fails() = %d, want 0", got)
 	}
 }
 
-func TestCountFailureEngineBecomesAvailableAfterExpiry(t *testing.T) {
-	m := &CaddyWAF{HealthFailDuration: caddy.Duration(100 * time.Millisecond)}
-	e := &Engine{maxFails: 1}
+func TestEngineFailBecomesAvailableAfterExpiry(t *testing.T) {
+	e := &Engine{maxFails: 1, failDuration: 100 * time.Millisecond}
 
-	m.countFailure(e)
+	e.fail()
 	if e.Available() {
 		t.Error("engine should be unavailable after failure")
 	}
@@ -246,7 +242,7 @@ func TestCountFailureEngineBecomesAvailableAfterExpiry(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	if !e.Available() {
-		t.Error("engine should be available after timer expiry")
+		t.Error("engine should be available after window expiry")
 	}
 }
 
@@ -314,9 +310,8 @@ func ensureWAFMetrics(t *testing.T) {
 
 func newTestWAF(engines EnginePool, retries int) *CaddyWAF {
 	return &CaddyWAF{
-		logger:     zap.NewNop(),
-		instanceID: "test",
-		Engines:    engines,
+		logger:  zap.NewNop(),
+		Engines: engines,
 		LoadBalancing: &LoadBalancing{
 			SelectionPolicy: &RoundRobinSelection{robin: ^uint32(0)},
 			Retries:         retries,

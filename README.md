@@ -47,6 +47,14 @@ By default (`lb_retries 0`), a Detect engine error fail-opens immediately (same 
 Set `lb_retries` to try other engines on the same request (engine errors only; client errors are never retried).
 To approximate nginx `t1k_next_upstream` with N engines, use `lb_retries N-1`.
 
+# Shared engines and connection pools
+
+WAF instances that reference the same engine address (`waf_engine_addr`) with identical pool and health parameters share one Connection pool process-wide — one Engine per address, reference-counted across instances. This keeps the total number of TCP connections to the engine cluster bounded (N_addresses × `max_cap`) instead of scaling with the number of instances, and makes passive health state agreed globally (an Engine marked unhealthy by one site is avoided by all sites).
+
+Instances with different parameter sets (e.g. a different `max_cap` or `health_fail_duration`) get separate pools to the same address. This also preserves per-site capacity tuning: a site that needs a larger pool can set its own parameters and gets its own pool.
+
+Because pools are per engine address, pool and health metrics are labeled by engine address only (no `waf_instance` label); a shared Engine exposes exactly one series.
+
 # How to build
 
 ```

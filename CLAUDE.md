@@ -45,52 +45,53 @@ go mod verify
 
 ## Architecture
 
-Four core source files plus metrics/error helpers:
+Five core source files plus metrics/error helpers:
 
 | File | Responsibility |
 |------|---------------|
-| `waf.go` | Module registration, `Engine` wrapper struct, `Provision` (pool init), `ServeHTTP` (detect + block + metrics), `Cleanup`, error classification (`isEngineError`), passive health check (`countFailure`) |
+| `waf.go` | Module registration, `Engine` wrapper struct (self-contained health: `fail()`/`Destruct()`), `Provision` (acquire Engines from the registry), `ServeHTTP` (detect + block + metrics), `Cleanup` (release registry references), error classification (`isEngineError`) |
+| `engine_pool.go` | Process-wide, reference-counted Engine registry (`caddy.UsagePool`): `engineKey` (address + all pool/health params), `acquireEngine`/`releaseEngine` (the registry invokes `Engine.Destruct()` on final release) |
 | `caddyfile.go` | Caddyfile directive parsing (`waf_chaitin { ... }`) |
 | `load_balancer.go` | `Selector` interface + `RandomSelection` / `RoundRobinSelection` implementations (skip unhealthy engines) |
 | `rule.go` | `redirectIntercept` — writes the block response when a request is flagged |
-| `metrics.go` | Prometheus metrics registration and pool/health gauge updater (10s) |
+| `metrics.go` | Prometheus metrics registration and single global pool/health gauge updater (10s) |
 | `errors.go` | `classifyConnectionError` — maps Detect errors to Prometheus `reason` labels |
 
 **Request flow:**  
-`ServeHTTP` → when `max_body_size > 0` and the body exceeds the cap or its length is unknown, pre-read the first N+1 bytes, reattach the fully-read segment plus the remaining original stream to the downstream request, and build a separate request containing only the first N bytes for detection; when the length is known and within the cap, or the cap is 0, the original request is kept as-is → loop up to 1+lb_retries: Select from engines excluding already-tried (skips unhealthy) → `DetectHttpRequest` → on success block/pass → on client error fail-open → on engine error `countFailure` and retry if attempts remain and untried engines exist → else fail-open. If Select returns nil with no prior tries → failopen; if nil after tries → error.
+`ServeHTTP` → when `max_body_size > 0` and the body exceeds the cap or its length is unknown, pre-read the first N+1 bytes, reattach the fully-read segment plus the remaining original stream to the downstream request, and build a separate request containing only the first N bytes for detection; when the length is known and within the cap, or the cap is 0, the original request is kept as-is → loop up to 1+lb_retries: Select from engines excluding already-tried (skips unhealthy) → `DetectHttpRequest` → on success block/pass → on client error fail-open → on engine error `engine.fail()` and retry if attempts remain and untried engines exist → else fail-open. If Select returns nil with no prior tries → failopen; if nil after tries → error.
 
 **Error classification:**  
 `isEngineError()` distinguishes client-side errors (H3_REQUEST_CANCELLED, client disconnected, keepalive limit, `read request body` prefix from t1k-go Body reads, etc.) from engine-side errors (connection refused, dial timeout, broken pipe, engine TCP connection reset). Client body-read failures are tagged with `read request body` so they are not confused with engine-side `unexpected EOF` / reset. Only engine errors count toward health check failures.
 
 **Passive health check (Caddy-style):**  
-On engine error, `countFailure()` atomically increments the engine's fail counter and spawns a goroutine that decrements it after `health_fail_duration`. When `fails >= health_max_fails`, the engine is marked unavailable and skipped by selection policies. Setting `health_fail_duration` to 0 (default) disables health checking entirely.
+On engine error, `Engine.fail()` atomically increments the Engine's fail counter and schedules a `time.AfterFunc` that decrements it after the Engine's own `failDuration` (copied from `health_fail_duration` at construction). When `fails >= maxFails` (`health_max_fails`), the Engine is marked unavailable and skipped by selection policies. Because the health window lives on the shared Engine, all instances agree on availability. Setting `health_fail_duration` to 0 (default) disables health checking entirely.
 
 **Intercept response:**  
 Blocked requests set `Content-Type: application/json`, `X-Event-ID`, return HTTP 501, and write `{"message":"Intercept illegal requests","event_id":"..."}` JSON from `redirectIntercept`.
 
 **Prometheus metrics:**  
-Each `waf_chaitin` provision site is its own `CaddyWAF` instance (multiple `import waf` in a Caddyfile → multiple instances). The pool/health gauges and the two counters below carry a `waf_instance` label (a per-instance id assigned in `Provision`) so series from different instances don't overwrite each other. Use `sum by (engine)(...)` for totals and `max by (engine)(caddy_waf_engines_healthy)` for health; `Cleanup` deletes that instance's gauge series on reload. `requests_total`, `detect_duration_seconds`, and `oversize_requests_total` have no `waf_instance` (multi-instance accumulate/merge is already correct).
+Engines are shared process-wide (see `engine_pool.go`); one global updater goroutine (started once by the first provisioned instance, `startGlobalMetricsUpdater`) reports every Engine in the registry on a 10s cadence. Pool/health gauges, `pool_events_total`, and `connection_errors_total` are labeled by Engine address only — there is no `waf_instance` label — so a shared Engine exposes exactly one series and `sum by (engine)(...)` / `max by (engine)(caddy_waf_engines_healthy)` work directly. `Cleanup` releases registry references; an Engine's metric series are removed by its `Destruct` when the last referencing instance releases it. `requests_total`, `detect_duration_seconds`, and `oversize_requests_total` have always been instance-independent.
 
-Request / detection (no `waf_instance`):
+Request / detection:
 - `caddy_waf_requests_total{action}` — counter (blocked/passed/error/failopen)
 - `caddy_waf_detect_duration_seconds{engine}` — histogram
 - `caddy_waf_oversize_requests_total` — counter of requests whose body was truncated for detection
 
-Engine health & connection pool (refreshed every 10s):
-- `caddy_waf_engines_healthy{engine,waf_instance}` — gauge (1=healthy, 0=unhealthy)
-- `caddy_waf_pool_idle_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_active_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_max_conns{engine,waf_instance}` — gauge
-- `caddy_waf_pool_waiting_requests{engine,waf_instance}` — gauge
+Engine health & connection pool (refreshed every 10s by the single global updater):
+- `caddy_waf_engines_healthy{engine}` — gauge (1=healthy, 0=unhealthy)
+- `caddy_waf_pool_idle_conns{engine}` — gauge
+- `caddy_waf_pool_active_conns{engine}` — gauge
+- `caddy_waf_pool_max_conns{engine}` — gauge
+- `caddy_waf_pool_waiting_requests{engine}` — gauge
 
 Connection errors & pool events:
-- `caddy_waf_connection_errors_total{engine,reason,waf_instance}` — counter (Detect-layer errors: connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other)
-- `caddy_waf_pool_events_total{engine,reason,waf_instance}` — counter (pool lifecycle: dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit)
+- `caddy_waf_connection_errors_total{engine,reason}` — counter (Detect-layer errors: connection_refused, dial_timeout, broken_pipe, max_active_reached, pool_closed, client_error, other)
+- `caddy_waf_pool_events_total{engine,reason}` — counter (pool lifecycle: dial_failed, idle_expired, ping_failed, pool_full_close, max_active_hit)
 
 Scrape via Caddy `metrics` handler or Admin API `/metrics`. See README for examples.
 
 **Engine pool:**  
-Each address in `waf_engine_addrs` gets its own `t1k.ChannelPool` (a TCP connection pool to one SafeLine engine). The pool settings (`initial_cap`, `max_idle`, `max_cap`, `idle_timeout`) are shared across all pools.
+Engines are process-shared via the registry in `engine_pool.go`: one `t1k.ChannelPool` (a TCP connection pool to one SafeLine engine address) per unique `engineKey` (address + `initial_cap` + `max_idle` + `max_cap` + `idle_timeout` + `health_max_fails` + `health_fail_duration`). All WAF instances referencing the same address with identical shaping parameters share one Engine and its pool; differing parameters yield independent Engines. An Engine survives config reloads until the last referencing instance releases it.
 
 ## Important: Module Replace Directive
 
